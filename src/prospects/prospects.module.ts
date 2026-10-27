@@ -1,9 +1,15 @@
 import { Module } from '@nestjs/common';
-import { ProspectsController } from './prospects.controller';
+import { CadencesModule } from '../cadences/cadences.module';
+import {
+  BalancesController,
+  ProspectsController,
+} from './prospects.controller';
 import { ProspectsService } from './prospects.service';
 
 @Module({
-  controllers: [ProspectsController],
+  imports: [CadencesModule],
+  controllers: [ProspectsController, BalancesController],
   providers: [ProspectsService],
+  exports: [ProspectsService],
 })
 export class ProspectsModule {}

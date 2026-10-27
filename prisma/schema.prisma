@@ -31,6 +31,53 @@ enum Stage {
   DECLINED
 }
 
+/// Bank products a prospect may want or already hold.
+enum Product {
+  CURRENT
+  SAVINGS
+  FIXED_DEPOSIT
+  DOMICILIARY
+  POS
+  LOAN
+  PAYROLL
+  TRADE
+  DIGITAL
+}
+
+/// Where a prospect came from, to see which channels convert.
+enum Source {
+  REFERRAL
+  EXISTING_CUSTOMER
+  PERSONAL_NETWORK
+  WALK_IN
+  EVENT
+  COLD_OUTREACH
+  SOCIAL_MEDIA
+  OTHER
+}
+
+enum CallOutcome {
+  INTERESTED
+  CALL_BACK
+  NOT_NOW
+  NO_ANSWER
+  WRONG_NUMBER
+  NOT_INTERESTED
+}
+
+enum ConsentMethod {
+  VERBAL
+  WRITTEN
+  WHATSAPP
+  EMAIL
+  FORM
+}
+
+enum TeamRole {
+  MANAGER
+  MEMBER
+}
+
 enum ActivityType {
   CALL
   WHATSAPP
@@ -46,23 +93,128 @@ model User {
   name             String
   email            String   @unique
   passwordHash     String
-  refreshTokenHash String?
+  phone            String?
+  jobTitle         String?
+  branch           String?
+  // Small square JPEG/PNG/WebP as a data URL, resized in the browser before upload
+  avatarUrl        String?
   role             Role     @default(RM)
   // Confirmation target in naira
   targetAmount     BigInt   @default(180000000)
   // Start of the measurement window for the target
   targetStartDate  DateTime @default(now()) @db.Date
+  // End of the measurement window; null means six months after the start
+  targetEndDate    DateTime? @db.Date
   timezone         String   @default("Africa/Lagos")
   // Contacts to log per day; drives the goal ring and streak
   dailyGoal        Int      @default(10)
   // Default message templates are created once, so deleting them sticks
   templatesSeeded  Boolean  @default(false)
+  cadencesSeeded   Boolean  @default(false)
+
+  // Morning summary (email and push) at this local hour
+  digestEmail      Boolean  @default(true)
+  digestPush       Boolean  @default(true)
+  digestHour       Int      @default(7)
+  lastDigestOn     String?
+  // Weekly report emailed on Monday mornings
+  managerEmail     String?
+  weeklyReport     Boolean  @default(false)
+  lastReportOn     String?
+
+  // Secret token for the read-only calendar feed (.ics)
+  calendarToken    String?  @unique
+
+  // TOTP two-step sign-in. Backup codes are stored as SHA-256 hashes.
+  twoFactorSecret  String?
+  twoFactorEnabled Boolean  @default(false)
+  backupCodes      String[]
+
+  teamId           String?
+  teamRole         TeamRole?
+
   createdAt        DateTime @default(now())
   updatedAt        DateTime @updatedAt
 
-  prospects  Prospect[]
-  activities Activity[]
-  templates  Template[]
+  team          Team?              @relation(fields: [teamId], references: [id], onDelete: SetNull)
+  prospects     Prospect[]
+  activities    Activity[]
+  templates     Template[]
+  cadences      Cadence[]
+  balances      Balance[]
+  resetTokens   PasswordResetToken[]
+  sessions      Session[]
+  pushSubs      PushSubscription[]
+  auditLogs     AuditLog[]
+}
+
+/// A signed-in device. The refresh token's SHA-256 is rotated on every refresh.
+model Session {
+  id         String   @id @default(uuid())
+  userId     String
+  tokenHash  String   @unique
+  userAgent  String?
+  ip         String?
+  createdAt  DateTime @default(now())
+  lastUsedAt DateTime @default(now())
+  expiresAt  DateTime
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+model PushSubscription {
+  id        String   @id @default(uuid())
+  userId    String
+  endpoint  String   @unique
+  p256dh    String
+  auth      String
+  userAgent String?
+  createdAt DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+/// Security-relevant events: sign-ins, password and 2FA changes, exports, deletions.
+model AuditLog {
+  id        String   @id @default(uuid())
+  userId    String
+  action    String
+  detail    String?
+  ip        String?
+  userAgent String?
+  createdAt DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, createdAt])
+}
+
+/// A small group of RMs. Managers see each member's totals, never their prospects.
+model Team {
+  id         String   @id @default(uuid())
+  name       String
+  inviteCode String   @unique
+  createdAt  DateTime @default(now())
+
+  members User[]
+}
+
+/// One-time password reset links. Only the SHA-256 of the token is stored.
+model PasswordResetToken {
+  id        String    @id @default(uuid())
+  userId    String
+  tokenHash String    @unique
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime  @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
 }
 
 model Prospect {
@@ -81,14 +233,74 @@ model Prospect {
   nextDate      DateTime? @db.Date
   notes         String?
   lastContactAt DateTime?
+  // When the prospect entered its current stage, for stale alerts
+  stageChangedAt DateTime @default(now())
+  // Why they declined, or what won them over
+  outcomeReason String?
+  source        Source?
+  wantsProducts Product[]
+  holdsProducts Product[]
+  referredById  String?
+  // "MM-DD"; the year is rarely known
+  birthday      String?
+  area          String?
+  address       String?
+  latitude      Float?
+  longitude     Float?
+  // Consent to be contacted and to hold their details (NDPA 2023)
+  consentAt     DateTime?
+  consentMethod ConsentMethod?
+  consentNote   String?
+  cadenceId     String?
+  // Index of the next step to do in the cadence
+  cadenceStep   Int?
+  cadenceStart  DateTime? @db.Date
   createdAt     DateTime  @default(now())
   updatedAt     DateTime  @updatedAt
 
   owner      User       @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  referredBy Prospect?  @relation("Referrals", fields: [referredById], references: [id], onDelete: SetNull)
+  referrals  Prospect[] @relation("Referrals")
+  cadence    Cadence?   @relation(fields: [cadenceId], references: [id], onDelete: SetNull)
   activities Activity[]
+  balances   Balance[]
 
   @@index([ownerId, nextDate])
   @@index([ownerId, stage])
+  @@index([referredById])
+}
+
+/// A customer's balance for a month (first day of the month). Drives the real
+/// progress figure; the latest one is mirrored to Prospect.funded.
+model Balance {
+  id         String   @id @default(uuid())
+  prospectId String
+  userId     String
+  month      DateTime @db.Date
+  amount     BigInt
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  prospect Prospect @relation(fields: [prospectId], references: [id], onDelete: Cascade)
+  user     User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([prospectId, month])
+  @@index([userId, month])
+}
+
+/// A follow-up plan: steps of { day, type, action } counted from the start date.
+model Cadence {
+  id        String   @id @default(uuid())
+  ownerId   String
+  name      String
+  steps     Json
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  owner     User       @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  prospects Prospect[]
+
+  @@index([ownerId])
 }
 
 model Activity {
@@ -96,6 +308,7 @@ model Activity {
   prospectId String
   userId     String
   type       ActivityType
+  outcome    CallOutcome?
   note       String?
   // Only set for STAGE_CHANGE
   fromStage  Stage?

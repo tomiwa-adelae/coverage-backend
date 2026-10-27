@@ -9,6 +9,7 @@ export function serializeProspect(p: Prospect) {
     potential: num(p.potential),
     funded: num(p.funded),
     nextDate: ymd(p.nextDate),
+    cadenceStart: ymd(p.cadenceStart),
   };
 }
 
