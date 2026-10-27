@@ -1,0 +1,125 @@
+// Coverage — prospect pipeline and follow-up tracker.
+// Money is stored in whole naira as BigInt (serialised to Number in API responses).
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+enum Role {
+  RM
+  ADMIN
+}
+
+enum Tier {
+  A
+  B
+  C
+}
+
+enum Stage {
+  IDENTIFIED
+  CONTACTED
+  INTERESTED
+  FORMS_SENT
+  FORMS_RECEIVED
+  ACCOUNT_OPENED
+  FUNDED
+  DECLINED
+}
+
+enum ActivityType {
+  CALL
+  WHATSAPP
+  VISIT
+  MEETING
+  EMAIL
+  SMS
+  STAGE_CHANGE
+}
+
+model User {
+  id               String   @id @default(uuid())
+  name             String
+  email            String   @unique
+  passwordHash     String
+  refreshTokenHash String?
+  role             Role     @default(RM)
+  // Confirmation target in naira
+  targetAmount     BigInt   @default(180000000)
+  // Start of the measurement window for the target
+  targetStartDate  DateTime @default(now()) @db.Date
+  timezone         String   @default("Africa/Lagos")
+  // Contacts to log per day; drives the goal ring and streak
+  dailyGoal        Int      @default(10)
+  // Default message templates are created once, so deleting them sticks
+  templatesSeeded  Boolean  @default(false)
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  prospects  Prospect[]
+  activities Activity[]
+  templates  Template[]
+}
+
+model Prospect {
+  id            String    @id @default(uuid())
+  ownerId       String
+  name          String
+  company       String?
+  group         String?
+  phone         String?
+  email         String?
+  tier          Tier?
+  stage         Stage     @default(IDENTIFIED)
+  potential     BigInt?
+  funded        BigInt?
+  nextAction    String?
+  nextDate      DateTime? @db.Date
+  notes         String?
+  lastContactAt DateTime?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  owner      User       @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  activities Activity[]
+
+  @@index([ownerId, nextDate])
+  @@index([ownerId, stage])
+}
+
+model Activity {
+  id         String       @id @default(uuid())
+  prospectId String
+  userId     String
+  type       ActivityType
+  note       String?
+  // Only set for STAGE_CHANGE
+  fromStage  Stage?
+  toStage    Stage?
+  occurredAt DateTime     @default(now())
+
+  prospect Prospect @relation(fields: [prospectId], references: [id], onDelete: Cascade)
+  user     User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, occurredAt])
+  @@index([prospectId, occurredAt])
+}
+
+/// Reusable outreach message. Body supports {firstName}, {name}, {company} and {myName}.
+model Template {
+  id        String   @id @default(uuid())
+  ownerId   String
+  name      String
+  body      String
+  position  Int      @default(0)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  owner User @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+
+  @@index([ownerId, position])
+}
