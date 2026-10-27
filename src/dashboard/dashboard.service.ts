@@ -227,52 +227,43 @@ export class DashboardService {
     const thisWeek = weekStart(today);
     const firstWeek = addDays(thisWeek, -7 * 7);
 
-    const [prospects, touches, openings, firstOpenings, target] =
-      await Promise.all([
-        this.prisma.prospect.findMany({
-          where: { ownerId: userId },
-          select: {
-            id: true,
-            stage: true,
-            tier: true,
-            potential: true,
-            funded: true,
-            source: true,
-            outcomeReason: true,
-            wantsProducts: true,
-            holdsProducts: true,
-            createdAt: true,
-          },
-        }),
-        this.prisma.activity.findMany({
-          where: {
-            userId,
-            type: { not: ActivityType.STAGE_CHANGE },
-            occurredAt: { gte: startOfDay(firstWeek, user.timezone) },
-          },
-          select: { occurredAt: true },
-        }),
-        this.prisma.activity.findMany({
-          where: {
-            userId,
-            type: ActivityType.STAGE_CHANGE,
-            toStage: Stage.ACCOUNT_OPENED,
-            occurredAt: { gte: startOfDay(firstWeek, user.timezone) },
-          },
-          select: { occurredAt: true },
-        }),
-        // First time each prospect reached an opened account, for time-to-open.
-        this.prisma.activity.groupBy({
-          by: ['prospectId'],
-          where: {
-            userId,
-            type: ActivityType.STAGE_CHANGE,
-            toStage: { in: OPENED },
-          },
-          _min: { occurredAt: true },
-        }),
-        this.target(userId),
-      ]);
+    const [prospects, touches, firstOpenings, target] = await Promise.all([
+      this.prisma.prospect.findMany({
+        where: { ownerId: userId },
+        select: {
+          id: true,
+          stage: true,
+          tier: true,
+          potential: true,
+          funded: true,
+          source: true,
+          outcomeReason: true,
+          wantsProducts: true,
+          holdsProducts: true,
+          createdAt: true,
+        },
+      }),
+      this.prisma.activity.findMany({
+        where: {
+          userId,
+          type: { not: ActivityType.STAGE_CHANGE },
+          occurredAt: { gte: startOfDay(firstWeek, user.timezone) },
+        },
+        select: { occurredAt: true },
+      }),
+      // First time each prospect reached an opened account, for time-to-open
+      // and the weekly count (a jump straight to Funded still counts once).
+      this.prisma.activity.groupBy({
+        by: ['prospectId'],
+        where: {
+          userId,
+          type: ActivityType.STAGE_CHANGE,
+          toStage: { in: OPENED },
+        },
+        _min: { occurredAt: true },
+      }),
+      this.target(userId),
+    ]);
 
     const sum = (xs: (bigint | null)[]) =>
       Number(xs.reduce<bigint>((a, b) => a + (b ?? 0n), 0n));
@@ -288,7 +279,9 @@ export class DashboardService {
       return {
         weekStart: start,
         touches: touches.filter((t) => inWeek(t.occurredAt)).length,
-        accountsOpened: openings.filter((t) => inWeek(t.occurredAt)).length,
+        accountsOpened: firstOpenings.filter(
+          (o) => o._min.occurredAt && inWeek(o._min.occurredAt),
+        ).length,
       };
     });
 

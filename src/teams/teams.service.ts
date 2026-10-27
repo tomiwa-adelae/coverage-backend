@@ -53,17 +53,22 @@ export class TeamsService {
               occurredAt: { gte: startOfDay(monday, m.timezone) },
             },
           }),
-          this.prisma.activity.count({
+          // First time each prospect reached an opened account, so a jump
+          // straight to Funded counts and opened-then-funded counts once.
+          this.prisma.activity.groupBy({
+            by: ['prospectId'],
             where: {
               userId: m.id,
               type: ActivityType.STAGE_CHANGE,
-              toStage: 'ACCOUNT_OPENED',
-              occurredAt: {
-                gte: startOfDay(addDays(today, -29), m.timezone),
-              },
+              toStage: { in: ['ACCOUNT_OPENED', 'FUNDED'] },
             },
+            _min: { occurredAt: true },
           }),
         ]);
+        const since = startOfDay(addDays(today, -29), m.timezone);
+        const openedRecently = opened.filter(
+          (o) => o._min.occurredAt && o._min.occurredAt >= since,
+        ).length;
         return {
           id: m.id,
           name: m.name,
@@ -79,7 +84,7 @@ export class TeamsService {
           onPace: t.onPace,
           weightedPipeline: t.forecast.weighted,
           contactsThisWeek: contacts,
-          accountsOpened30d: opened,
+          accountsOpened30d: openedRecently,
         };
       }),
     );
