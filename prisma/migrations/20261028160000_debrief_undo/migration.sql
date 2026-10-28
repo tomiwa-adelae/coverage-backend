@@ -1,0 +1,1 @@
+ALTER TABLE "Debrief" ADD COLUMN "undo" JSONB, ADD COLUMN "appliedAt" TIMESTAMP(3);

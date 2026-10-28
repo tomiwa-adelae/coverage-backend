@@ -27,6 +27,72 @@ const YMD = /^\d{4}-\d{2}-\d{2}$/;
 /** A job that hasn't moved in this long died with a server restart. */
 const STUCK_MS = 6 * 60_000;
 const KEEP_DAYS = 14;
+/** How long after saving a debrief it can be undone. */
+const UNDO_MS = 10 * 60_000;
+
+/** Prospect fields a debrief can change, restored as they were on undo. */
+const RESTORABLE = {
+  stage: true,
+  stageChangedAt: true,
+  outcomeReason: true,
+  potential: true,
+  funded: true,
+  tier: true,
+  referredById: true,
+  wantsProducts: true,
+  holdsProducts: true,
+  nextAction: true,
+  nextDate: true,
+  nextTime: true,
+  remindedFor: true,
+  checkedInFor: true,
+  notes: true,
+  lastContactAt: true,
+  cadenceId: true,
+  cadenceStep: true,
+  cadenceStart: true,
+} satisfies Prisma.ProspectSelect;
+
+type Restorable = Prisma.ProspectGetPayload<{ select: typeof RESTORABLE }>;
+
+/** One person's changes from a saved debrief, as stored for undo. */
+interface UndoItem {
+  prospectId: string;
+  created: boolean;
+  /** The fields before saving, JSON-safe (dates as ISO, amounts as strings). */
+  before?: Record<string, unknown>;
+  balances?: { id: string; month: string; amount: string }[];
+  activityIds?: string[];
+}
+
+const DATE_FIELDS = new Set([
+  'stageChangedAt',
+  'nextDate',
+  'lastContactAt',
+  'cadenceStart',
+]);
+
+const toJson = (p: Restorable) =>
+  Object.fromEntries(
+    Object.entries(p).map(([k, v]) => [
+      k,
+      v instanceof Date ? v.toISOString() : typeof v === 'bigint' ? `${v}` : v,
+    ]),
+  );
+
+const fromJson = (o: Record<string, unknown>) =>
+  Object.fromEntries(
+    Object.entries(o).map(([k, v]) => [
+      k,
+      v === null
+        ? null
+        : DATE_FIELDS.has(k)
+          ? new Date(v as string)
+          : k === 'potential' || k === 'funded'
+            ? BigInt(v as string)
+            : v,
+    ]),
+  ) as Prisma.ProspectUncheckedUpdateInput;
 
 /** What the review screen shows for one person, before you confirm it. */
 export interface Suggestion {
@@ -109,6 +175,10 @@ export class DebriefService {
       transcript: d.transcript,
       result: d.result as DebriefResult | null,
       applied: d.applied,
+      undoUntil:
+        d.status === DebriefStatus.APPLIED && d.undo && d.appliedAt
+          ? new Date(d.appliedAt.getTime() + UNDO_MS).toISOString()
+          : null,
       error: d.error,
       createdAt: d.createdAt.toISOString(),
       updatedAt: d.updatedAt.toISOString(),
@@ -418,6 +488,7 @@ export class DebriefService {
       created?: boolean;
       error?: string;
     }[] = [];
+    const undo: UndoItem[] = [];
 
     for (const item of dto.items) {
       let name = item.newProspect?.name ?? 'Prospect';
@@ -437,6 +508,32 @@ export class DebriefService {
           });
           prospectId = p.id;
           created = true;
+          undo.push({ prospectId, created });
+        } else {
+          const [before, balances, activities] = await Promise.all([
+            this.prisma.prospect.findFirst({
+              where: { id: prospectId, ownerId: userId },
+              select: RESTORABLE,
+            }),
+            this.prisma.balance.findMany({ where: { prospectId } }),
+            this.prisma.activity.findMany({
+              where: { prospectId },
+              select: { id: true },
+            }),
+          ]);
+          if (before)
+            undo.push({
+              prospectId,
+              created,
+              before: toJson(before),
+              balances: balances.map((b) => ({
+                id: b.id,
+                month: b.month.toISOString(),
+                amount: `${b.amount}`,
+              })),
+              // Swapped for the new ones once everything is saved.
+              activityIds: activities.map((a) => a.id),
+            });
         }
         const current = await this.prisma.prospect.findFirst({
           where: { id: prospectId, ownerId: userId },
@@ -511,11 +608,83 @@ export class DebriefService {
       }
     }
 
+    // Contacts logged by this save are the ones that weren't there before.
+    for (const u of undo) {
+      if (u.created || !u.activityIds) continue;
+      const had = new Set(u.activityIds);
+      const now = await this.prisma.activity.findMany({
+        where: { prospectId: u.prospectId },
+        select: { id: true },
+      });
+      u.activityIds = now.map((a) => a.id).filter((a) => !had.has(a));
+    }
+
     const saved = await this.prisma.debrief.update({
       where: { id },
-      data: { applied: results },
+      data: {
+        applied: results,
+        undo: undo as unknown as Prisma.InputJsonValue,
+        appliedAt: new Date(),
+      },
     });
     return this.view(saved);
+  }
+
+  /**
+   * Puts every record back as it was before the debrief was saved, and
+   * returns the debrief to review. Only for a few minutes after saving.
+   */
+  async undo(userId: string, id: string) {
+    const d = await this.owned(userId, id);
+    if (d.status !== DebriefStatus.APPLIED || !d.undo || !d.appliedAt)
+      throw new ConflictException('This debrief can’t be undone.');
+    if (Date.now() - d.appliedAt.getTime() > UNDO_MS)
+      throw new ConflictException(
+        'It’s been more than 10 minutes, so this can’t be undone. Change the records directly instead.',
+      );
+    const { count } = await this.prisma.debrief.updateMany({
+      where: { id, status: DebriefStatus.APPLIED, appliedAt: d.appliedAt },
+      data: {
+        status: DebriefStatus.READY,
+        applied: Prisma.DbNull,
+        undo: Prisma.DbNull,
+        appliedAt: null,
+      },
+    });
+    if (!count) throw new ConflictException('This debrief can’t be undone.');
+
+    const items = (d.undo as unknown as UndoItem[]).slice().reverse();
+    await this.prisma.$transaction(async (tx) => {
+      for (const u of items) {
+        if (u.created) {
+          await tx.prospect.deleteMany({
+            where: { id: u.prospectId, ownerId: userId },
+          });
+          continue;
+        }
+        const { count } = await tx.prospect.updateMany({
+          where: { id: u.prospectId, ownerId: userId },
+          data: fromJson(u.before ?? {}),
+        });
+        if (!count) continue; // Deleted since; nothing to put back.
+        if (u.activityIds?.length)
+          await tx.activity.deleteMany({
+            where: { id: { in: u.activityIds }, prospectId: u.prospectId },
+          });
+        await tx.balance.deleteMany({ where: { prospectId: u.prospectId } });
+        if (u.balances?.length)
+          await tx.balance.createMany({
+            data: u.balances.map((b) => ({
+              id: b.id,
+              prospectId: u.prospectId,
+              userId,
+              month: new Date(b.month),
+              amount: BigInt(b.amount),
+            })),
+          });
+      }
+    });
+    return this.view(await this.owned(userId, id));
   }
 
   async remove(userId: string, id: string) {
@@ -530,6 +699,16 @@ export class DebriefService {
     const cutoff = new Date(Date.now() - KEEP_DAYS * 24 * 3600_000);
     await this.prisma.debrief
       .deleteMany({ where: { createdAt: { lt: cutoff } } })
+      .catch((e: Error) => this.log.error(e.message));
+    // The undo copy holds client notes; drop it once undo has expired.
+    await this.prisma.debrief
+      .updateMany({
+        where: {
+          appliedAt: { lt: new Date(Date.now() - UNDO_MS) },
+          undo: { not: Prisma.DbNull },
+        },
+        data: { undo: Prisma.DbNull },
+      })
       .catch((e: Error) => this.log.error(e.message));
     for (const [id, u] of this.uploads)
       if (Date.now() - u.at > 30 * 60_000) this.uploads.delete(id);

@@ -99,6 +99,12 @@ export class DebriefController {
     return this.debriefs.apply(user.sub, id, dto);
   }
 
+  @Post(':id/undo')
+  @HttpCode(200)
+  undo(@CurrentUser() user: AuthUser, @Param('id', ParseUUIDPipe) id: string) {
+    return this.debriefs.undo(user.sub, id);
+  }
+
   @Delete(':id')
   @HttpCode(204)
   async remove(

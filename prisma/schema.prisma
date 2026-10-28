@@ -371,6 +371,9 @@ model Debrief {
   result     Json?
   // Per-item outcome after applying
   applied    Json?
+  // What saving changed, so it can be undone for a few minutes
+  undo       Json?
+  appliedAt  DateTime?
   error      String?
   createdAt  DateTime      @default(now())
   updatedAt  DateTime      @updatedAt
