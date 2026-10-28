@@ -10,6 +10,13 @@ import {
 const env = (k: string) => process.env[k]?.trim() || undefined;
 const log = new Logger('Gemini');
 
+/**
+ * A backup that just answered while the main model was failing. It's tried
+ * first for a while, so each request doesn't wait out the main one again.
+ */
+let preferred: { model: string; until: number } | null = null;
+const PREFER_MS = 15 * 60_000;
+
 export const geminiConfigured = () => !!env('GEMINI_API_KEY');
 
 export type GeminiPart =
@@ -73,15 +80,19 @@ export async function geminiGenerate(opts: {
 
   // Busy answers (429/5xx) usually pass in seconds, so the main model gets a
   // second try; a model that hangs until the timeout doesn't.
-  const plan = [main, main, ...backups];
+  const sticky =
+    preferred && preferred.until > Date.now() ? preferred.model : null;
+  const plan = sticky
+    ? [sticky, main, ...backups.filter((m) => m !== sticky)]
+    : [main, main, ...backups];
   const deadline = Date.now() + (opts.deadlineMs ?? 4 * 60_000);
   let res: Response | undefined;
   let detail = '';
   let timedOut = false;
   for (let i = 0; i < plan.length; i++) {
     const model = plan[i];
-    if (i === 1 && timedOut) continue;
-    if (i === 1) await new Promise((r) => setTimeout(r, 2000));
+    if (i === 1 && !sticky && timedOut) continue;
+    if (i === 1 && !sticky) await new Promise((r) => setTimeout(r, 2000));
     const left = deadline - Date.now();
     if (left < 10_000) break;
     try {
@@ -102,7 +113,14 @@ export async function geminiGenerate(opts: {
       continue;
     }
     timedOut = false;
-    if (res.ok) break;
+    if (res.ok) {
+      if (model !== main) {
+        if (preferred?.model !== model)
+          log.log(`answered by ${model}; trying it first for 15 minutes`);
+        preferred = { model, until: Date.now() + PREFER_MS };
+      } else preferred = null;
+      break;
+    }
     detail = (await res.text()).slice(0, 500);
     log.warn(`${model} ${res.status}: ${detail.replace(/\s+/g, ' ')}`);
     if (![404, 429, 500, 503, 504].includes(res.status)) break;
