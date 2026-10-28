@@ -26,6 +26,18 @@ export function startOfDay(ymd: string, timezone: string): Date {
   return new Date(utcMidnight.getTime() - (wall(timezone) - wall('UTC')));
 }
 
+/** The instant a local date and "HH:MM" time happen in a timezone. */
+export function instantOf(ymd: string, hhmm: string, timezone: string) {
+  const [h, m] = hhmm.split(':').map(Number);
+  return new Date(startOfDay(ymd, timezone).getTime() + (h * 60 + m) * 60_000);
+}
+
+/** "14:05" -> "2:05 pm" */
+export function clock(hhmm: string) {
+  const [h, m] = hhmm.split(':').map(Number);
+  return `${h % 12 || 12}:${String(m).padStart(2, '0')} ${h < 12 ? 'am' : 'pm'}`;
+}
+
 export function addDays(ymd: string, days: number): string {
   const d = toDate(ymd);
   d.setUTCDate(d.getUTCDate() + days);

@@ -6,10 +6,12 @@ import {
   NotificationsController,
 } from './notifications.controller';
 import { PushService } from './push.service';
+import { ReminderService } from './reminder.service';
 
 @Module({
   imports: [DashboardModule],
   controllers: [NotificationsController, JobsController],
-  providers: [PushService, DigestService],
+  providers: [PushService, DigestService, ReminderService],
+  exports: [PushService],
 })
 export class NotificationsModule {}

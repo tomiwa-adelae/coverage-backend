@@ -65,8 +65,16 @@ export class PushService {
     });
   }
 
-  /** Sends to every browser the user allowed. Returns how many received it. */
-  async send(userId: string, payload: PushPayload) {
+  /**
+   * Sends to every browser the user allowed. Returns how many received it.
+   * `ttl` is how long the push service keeps trying a phone that's offline;
+   * high urgency asks Android to wake a sleeping phone straight away.
+   */
+  async send(
+    userId: string,
+    payload: PushPayload,
+    opts: { ttl?: number; urgency?: 'normal' | 'high' } = {},
+  ) {
     if (!this.configured) return 0;
     this.setup();
     const subs = await this.prisma.pushSubscription.findMany({
@@ -79,7 +87,10 @@ export class PushService {
           await webpush.sendNotification(
             { endpoint: s.endpoint, keys: { p256dh: s.p256dh, auth: s.auth } },
             JSON.stringify(payload),
-            { TTL: 6 * 60 * 60 },
+            {
+              TTL: Math.max(60, Math.round(opts.ttl ?? 6 * 60 * 60)),
+              urgency: opts.urgency ?? 'normal',
+            },
           );
           delivered++;
         } catch (e) {
@@ -87,7 +98,10 @@ export class PushService {
           // Gone or unknown: the browser dropped the subscription.
           if (status === 404 || status === 410)
             await this.prisma.pushSubscription.delete({ where: { id: s.id } });
-          else this.log.warn(`push failed (${status ?? 'network'})`);
+          else
+            this.log.warn(
+              `push failed (${status ?? 'network'}): ${(e as Error).message}`,
+            );
         }
       }),
     );
@@ -99,12 +113,16 @@ export class PushService {
       throw new ServiceUnavailableException(
         'Phone notifications aren’t switched on for this server yet.',
       );
-    const count = await this.send(userId, {
-      title: 'Coverage notifications are on',
-      body: 'You’ll get your morning list here.',
-      url: '/',
-      tag: 'test',
-    });
+    const count = await this.send(
+      userId,
+      {
+        title: 'Coverage notifications are on',
+        body: 'You’ll get reminders and your morning list here.',
+        url: '/',
+        tag: 'test',
+      },
+      { ttl: 10 * 60, urgency: 'high' },
+    );
     if (!count)
       throw new ServiceUnavailableException(
         'We couldn’t reach this device. Turn notifications off and on again.',

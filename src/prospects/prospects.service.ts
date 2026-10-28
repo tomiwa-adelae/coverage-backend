@@ -86,6 +86,8 @@ function toData(dto: UpdateProspectDto) {
         : dto.nextDate
           ? toDate(dto.nextDate)
           : null,
+    // No date means no time either.
+    nextTime: dto.nextDate === null ? null : dto.nextTime,
     notes: blank(dto.notes),
     outcomeReason: blank(dto.outcomeReason),
     source: dto.source,
@@ -297,7 +299,13 @@ export class ProspectsService {
    * Record a touch. A first contact moves the prospect out of IDENTIFIED. The next
    * follow-up comes from the request, else the cadence's next step, else the tier gap.
    */
-  async logActivity(ownerId: string, id: string, dto: LogActivityDto) {
+  async logActivity(
+    ownerId: string,
+    id: string,
+    dto: LogActivityDto,
+    /** When it happened, for contacts logged after the fact (debriefs). */
+    occurredAt?: Date,
+  ) {
     const current = await this.prisma.prospect.findFirst({
       where: { id, ownerId },
       include: { cadence: true },
@@ -310,7 +318,7 @@ export class ProspectsService {
     const today = todayIn(user.timezone);
 
     const data: Prisma.ProspectUncheckedUpdateInput = {
-      lastContactAt: new Date(),
+      lastContactAt: occurredAt ?? new Date(),
     };
     const ops: Prisma.PrismaPromise<unknown>[] = [
       this.prisma.activity.create({
@@ -320,6 +328,7 @@ export class ProspectsService {
           type: dto.type,
           outcome: dto.outcome,
           note: dto.note?.trim() || null,
+          occurredAt,
         },
       }),
     ];
@@ -364,13 +373,17 @@ export class ProspectsService {
       data.nextAction = planned.nextAction;
     }
     const next = current.nextDate?.toISOString().slice(0, 10);
+    // A new date drops the old time unless one comes with it.
     if (dto.nextDate) {
       data.nextDate = toDate(dto.nextDate);
+      data.nextTime = dto.nextTime ?? null;
     } else if (planned) {
       data.nextDate = toDate(planned.nextDate);
+      data.nextTime = null;
     } else if (!next || next <= today) {
       const gap = current.tier ? FOLLOW_UP_DAYS[current.tier] : 7;
       data.nextDate = toDate(addDays(today, gap));
+      data.nextTime = null;
     }
 
     await this.prisma.$transaction([

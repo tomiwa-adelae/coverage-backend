@@ -97,6 +97,163 @@ const CardSchema = z.object({
   address: z.string().describe('Address on one line, empty if not shown.'),
 });
 
+const STAGES = [
+  'IDENTIFIED',
+  'CONTACTED',
+  'INTERESTED',
+  'FORMS_SENT',
+  'FORMS_RECEIVED',
+  'ACCOUNT_OPENED',
+  'FUNDED',
+  'DECLINED',
+] as const;
+
+const PRODUCTS = [
+  'CURRENT',
+  'SAVINGS',
+  'FIXED_DEPOSIT',
+  'DOMICILIARY',
+  'POS',
+  'LOAN',
+  'PAYROLL',
+  'TRADE',
+  'DIGITAL',
+] as const;
+
+const OUTCOMES = [
+  'INTERESTED',
+  'CALL_BACK',
+  'NOT_NOW',
+  'NO_ANSWER',
+  'WRONG_NUMBER',
+  'NOT_INTERESTED',
+] as const;
+
+const DebriefItemSchema = z.object({
+  mention: z
+    .string()
+    .describe(
+      'How the speaker referred to this person, quoted from the transcript, e.g. "Mr Eze from the pharmacy".',
+    ),
+  match: z
+    .enum(['EXISTING', 'NEW', 'UNSURE'])
+    .describe(
+      'EXISTING when clearly one prospect on the list; NEW when clearly not on the list; UNSURE when it could be more than one, or the name may be misheard.',
+    ),
+  ref: z
+    .string()
+    .describe(
+      'The P-number of the prospect (e.g. "P12") when EXISTING, the best guess when UNSURE, empty when NEW.',
+    ),
+  alternatives: z
+    .array(z.string())
+    .describe('Other P-numbers it could be when UNSURE. Empty otherwise.'),
+  name: z.string().describe('Full name for a NEW prospect; empty otherwise.'),
+  company: z
+    .string()
+    .describe('Company or business for a NEW prospect, if said; else empty.'),
+  phone: z
+    .string()
+    .describe('Phone number for a NEW prospect, if said; else empty.'),
+  area: z
+    .string()
+    .describe('Area or neighbourhood for a NEW prospect, if said; else empty.'),
+  contactType: z
+    .enum(['CALL', 'WHATSAPP', 'VISIT', 'MEETING', 'EMAIL', 'SMS', 'NONE'])
+    .describe(
+      'How the speaker was in touch with them. NONE when the person was only talked about, not contacted.',
+    ),
+  contactDate: z
+    .string()
+    .describe(
+      'YYYY-MM-DD the contact happened: today unless the speaker said otherwise (e.g. "yesterday"). Empty when contactType is NONE.',
+    ),
+  outcome: z
+    .enum([...OUTCOMES, 'UNKNOWN'])
+    .describe('How the contact went, or UNKNOWN.'),
+  note: z
+    .string()
+    .describe(
+      'What happened, in the first person as the speaker’s own note, cleaned of fillers. Keep every fact, figure, name and promise. One to four sentences.',
+    ),
+  stage: z
+    .enum([...STAGES, 'UNCHANGED'])
+    .describe(
+      'The pipeline stage they are now in, only if what was said clearly moves them (forms handed over, account opened, money deposited, said no). UNCHANGED otherwise. A first conversation alone is CONTACTED.',
+    ),
+  outcomeReason: z
+    .string()
+    .describe(
+      'When the stage is ACCOUNT_OPENED, FUNDED or DECLINED and a reason was said: why they said yes or no, in a few words. Else empty.',
+    ),
+  potential: z
+    .number()
+    .int()
+    .describe(
+      'Deposit potential in whole naira if the speaker said an expected amount ("about 20 million" = 20000000); -1 if not said.',
+    ),
+  funded: z
+    .number()
+    .int()
+    .describe(
+      'Amount they have actually deposited, in whole naira, only if the speaker said so; -1 otherwise.',
+    ),
+  tier: z
+    .enum(['A', 'B', 'C', 'UNCHANGED'])
+    .describe(
+      'Only if the speaker rated them (A = large and likely, C = small or unlikely). UNCHANGED otherwise.',
+    ),
+  wantsProducts: z
+    .array(z.enum(PRODUCTS))
+    .describe('Products they showed interest in, from what was said.'),
+  holdsProducts: z
+    .array(z.enum(PRODUCTS))
+    .describe('Products they now have with the bank, from what was said.'),
+  referredByRef: z
+    .string()
+    .describe(
+      'P-number of the prospect who referred them, if said and on the list; else empty.',
+    ),
+  nextAction: z
+    .string()
+    .describe(
+      'The next step the speaker will take, as a short instruction ("Pick up completed forms"). Empty if none was said.',
+    ),
+  nextDate: z
+    .string()
+    .describe(
+      'YYYY-MM-DD of the next step, worked out from the calendar given. Empty if no day was said.',
+    ),
+  nextTime: z
+    .string()
+    .describe(
+      '24-hour HH:MM of the next step if a time was said ("2pm" = "14:00"; "morning" alone is not a time). Empty otherwise.',
+    ),
+  check: z
+    .array(z.string())
+    .describe(
+      'Short questions about anything uncertain: a name that may be misheard, an amount that could be fifteen or fifty million, an unclear day. Empty if all is clear.',
+    ),
+});
+
+const DebriefSchema = z.object({
+  items: z
+    .array(DebriefItemSchema)
+    .describe(
+      'One entry per prospect or customer talked about, in the order first mentioned. Merge everything said about the same person into one entry.',
+    ),
+  other: z
+    .array(z.string())
+    .describe(
+      'Anything said that isn’t about a specific prospect (own to-dos, reminders, general notes), one short line each.',
+    ),
+});
+
+export type DebriefReading = z.infer<typeof DebriefSchema>;
+export type DebriefReadingItem = DebriefReading['items'][number];
+
+const WEEKDAY = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+
 export type Channel = 'WHATSAPP' | 'EMAIL' | 'SMS';
 
 /**
@@ -127,14 +284,18 @@ export class AiService {
   private async ask<T>(
     schema: z.ZodType<T>,
     content: Anthropic.Beta.BetaContentBlockParam[] | string,
+    opts: { effort?: 'low' | 'medium'; maxTokens?: number } = {},
   ): Promise<T> {
     try {
       const res = await this.anthropic.beta.messages.parse({
         model: MODEL,
-        max_tokens: 8000,
+        max_tokens: opts.maxTokens ?? 8000,
         betas: ['server-side-fallback-2026-07-01'],
         fallbacks: 'default',
-        output_config: { effort: 'low', format: betaZodOutputFormat(schema) },
+        output_config: {
+          effort: opts.effort ?? 'low',
+          format: betaZodOutputFormat(schema),
+        },
         system: SYSTEM,
         messages: [{ role: 'user', content }],
       });
@@ -293,6 +454,89 @@ ${transcript}
       nextAction: result.nextAction || null,
       nextInDays: result.nextInDays >= 0 ? result.nextInDays : null,
     };
+  }
+
+  /**
+   * Reads an end-of-day debrief and proposes updates per prospect. Prospects are
+   * given as P-numbers (cheaper than ids, and the model can't invent a valid id);
+   * the caller maps them back with `byRef`.
+   */
+  async readDebrief(ownerId: string, transcript: string) {
+    const [user, prospects] = await Promise.all([
+      this.prisma.user.findUniqueOrThrow({
+        where: { id: ownerId },
+        select: { name: true, timezone: true },
+      }),
+      this.prisma.prospect.findMany({
+        where: { ownerId },
+        orderBy: [{ lastContactAt: { sort: 'desc', nulls: 'last' } }],
+        take: 600,
+        select: {
+          id: true,
+          name: true,
+          company: true,
+          stage: true,
+          tier: true,
+          area: true,
+          phone: true,
+          nextAction: true,
+        },
+      }),
+    ]);
+    const today = todayIn(user.timezone);
+    const refs = prospects.map((p, i) => ({ ref: `P${i + 1}`, ...p }));
+    const list = refs
+      .map((p) =>
+        [
+          p.ref,
+          p.name,
+          p.company,
+          STAGE_LABEL[p.stage],
+          p.tier && `Tier ${p.tier}`,
+          p.area,
+          p.phone && `phone ends ${p.phone.replace(/\D/g, '').slice(-4)}`,
+          p.nextAction && `planned: ${p.nextAction}`,
+        ]
+          .filter(Boolean)
+          .join(' | '),
+      )
+      .join('\n');
+    // A lookup table beats date arithmetic for "next Thursday" and "yesterday".
+    const tags: Record<number, string> = {
+      6: ' (yesterday)',
+      7: ' (today)',
+      8: ' (tomorrow)',
+    };
+    const days = Array.from({ length: 22 }, (_, i) => {
+      const d = new Date(`${today}T12:00:00Z`);
+      d.setUTCDate(d.getUTCDate() + i - 7);
+      return `${WEEKDAY[d.getUTCDay()]} ${d.toISOString().slice(0, 10)}${tags[i] ?? ''}`;
+    }).join('\n');
+
+    const reading = await this.ask(
+      DebriefSchema,
+      `I'm ${user.name}, a relationship manager. Below is my spoken end-of-day debrief, transcribed by speech recognition, so names and numbers may be misheard. Sort out what I said about each prospect so I can review it and update my records in one go.
+
+Rules:
+- Match people to my prospect list using names, companies, areas and context. If a name only sounds like someone on the list, or two people fit, use UNSURE and ask in "check".
+- Never invent anything I didn't say. Leave fields empty (or -1, UNCHANGED, NONE) when I didn't say them.
+- Naira amounts: "20 million" = 20000000, "500k" = 500000.
+- Dates come from the calendar below; "next week" with no day means the same weekday next week.
+
+<calendar>
+${days}
+</calendar>
+
+<my_prospects>
+${list || 'No prospects yet.'}
+</my_prospects>
+
+<debrief>
+${transcript}
+</debrief>`,
+      { effort: 'medium', maxTokens: 16000 },
+    );
+    return { reading, today, byRef: new Map(refs.map((p) => [p.ref, p])) };
   }
 
   async scanCard(dataUrl: string) {

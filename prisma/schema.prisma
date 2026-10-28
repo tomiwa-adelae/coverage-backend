@@ -78,6 +78,15 @@ enum TeamRole {
   MEMBER
 }
 
+/// Where an end-of-day voice debrief is in its journey.
+enum DebriefStatus {
+  UPLOADING
+  PROCESSING
+  READY
+  FAILED
+  APPLIED
+}
+
 enum ActivityType {
   CALL
   WHATSAPP
@@ -117,6 +126,8 @@ model User {
   digestPush       Boolean  @default(true)
   digestHour       Int      @default(7)
   lastDigestOn     String?
+  // Push reminder this many minutes before a follow-up that has a time
+  reminderLead     Int      @default(30)
   // Weekly report emailed on Monday mornings
   managerEmail     String?
   weeklyReport     Boolean  @default(false)
@@ -146,6 +157,7 @@ model User {
   sessions      Session[]
   pushSubs      PushSubscription[]
   auditLogs     AuditLog[]
+  debriefs      Debrief[]
 }
 
 /// A signed-in device. The refresh token's SHA-256 is rotated on every refresh.
@@ -231,6 +243,10 @@ model Prospect {
   funded        BigInt?
   nextAction    String?
   nextDate      DateTime? @db.Date
+  // Local "HH:MM" on nextDate; set means a timed reminder is sent
+  nextTime      String?
+  // "YYYY-MM-DD HH:MM" of the follow-up a reminder was last sent for
+  remindedFor   String?
   notes         String?
   lastContactAt DateTime?
   // When the prospect entered its current stage, for stale alerts
@@ -335,4 +351,26 @@ model Template {
   owner User @relation(fields: [ownerId], references: [id], onDelete: Cascade)
 
   @@index([ownerId, position])
+}
+
+/// A spoken (or typed) end-of-day debrief: the transcript, the assistant's
+/// suggested updates for review, and what was applied. Audio is never stored.
+model Debrief {
+  id         String        @id @default(uuid())
+  userId     String
+  status     DebriefStatus @default(UPLOADING)
+  // Progress while PROCESSING: TRANSCRIBING or READING
+  step       String?
+  transcript String?
+  // Suggested updates, per person, for the review screen
+  result     Json?
+  // Per-item outcome after applying
+  applied    Json?
+  error      String?
+  createdAt  DateTime      @default(now())
+  updatedAt  DateTime      @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, createdAt])
 }

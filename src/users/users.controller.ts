@@ -3,6 +3,7 @@ import { Transform } from 'class-transformer';
 import {
   IsBoolean,
   IsEmail,
+  IsIn,
   IsInt,
   ValidateIf,
   IsNotEmpty,
@@ -19,6 +20,8 @@ import { CurrentUser } from '../common/decorators';
 import type { AuthUser } from '../common/decorators';
 import { toDate } from '../common/dates';
 import { PrismaService } from '../prisma/prisma.service';
+
+export const REMINDER_LEADS = [-1, 0, 5, 10, 15, 30, 60, 120];
 
 const trim = ({ value }: { value: unknown }) =>
   typeof value === 'string' ? value.trim() : value;
@@ -77,6 +80,11 @@ class UpdateMeDto {
 
   @IsOptional() @IsBoolean() weeklyReport?: boolean;
 
+  /** Minutes before a timed follow-up to send a reminder; -1 turns them off. */
+  @IsOptional()
+  @IsIn(REMINDER_LEADS, { message: 'Pick when to be reminded' })
+  reminderLead?: number;
+
   @IsOptional()
   @IsInt({ message: 'Daily goal must be a whole number' })
   @Min(1, { message: 'Daily goal must be at least 1' })
@@ -117,6 +125,7 @@ const view = (u: User) => ({
   digestHour: u.digestHour,
   managerEmail: u.managerEmail,
   weeklyReport: u.weeklyReport,
+  reminderLead: u.reminderLead,
   twoFactorEnabled: u.twoFactorEnabled,
   teamId: u.teamId,
   teamRole: u.teamRole,
@@ -164,6 +173,7 @@ export class UsersController {
         digestHour: dto.digestHour,
         managerEmail: blankToNull(dto.managerEmail),
         weeklyReport: dto.weeklyReport,
+        reminderLead: dto.reminderLead,
       },
     });
     return view(u);

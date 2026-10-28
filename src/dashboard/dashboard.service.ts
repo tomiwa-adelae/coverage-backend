@@ -205,6 +205,11 @@ export class DashboardService {
         .map((p) => ({ ...serializeProspect(p), score: score(p) })),
       overdue: out(overdue, byScore),
       dueToday: out(dueToday, byScore),
+      // Today's follow-ups that have a time, in time order.
+      appointments: dueToday
+        .filter((p) => p.nextTime)
+        .sort((a, b) => a.nextTime!.localeCompare(b.nextTime!))
+        .map(serializeProspect),
       noNextStep: out(noNextStep),
       upcoming: out(upcoming, sortByDate),
       unrated: out(unrated, (a, b) => a.name.localeCompare(b.name)),

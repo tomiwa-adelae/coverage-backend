@@ -10,6 +10,11 @@ async function bootstrap() {
   const app = await NestFactory.create<NestExpressApplication>(AppModule);
   // Profile pictures (base64) and spreadsheet imports need more than the 100 KB default.
   app.useBodyParser('json', { limit: '2mb' });
+  // Voice debriefs arrive as raw audio, in parts of up to 3 MB.
+  app.useBodyParser('raw', {
+    type: ['audio/*', 'video/webm', 'video/mp4', 'application/octet-stream'],
+    limit: '3mb',
+  });
   // Behind Render's load balancer and the Next.js proxy: read the client IP from X-Forwarded-For.
   app.set('trust proxy', true);
 

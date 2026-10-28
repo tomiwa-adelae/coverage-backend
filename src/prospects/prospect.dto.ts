@@ -31,6 +31,7 @@ import {
 
 const YMD = /^\d{4}-\d{2}-\d{2}$/;
 const YM = /^\d{4}-(0[1-9]|1[0-2])$/;
+export const HHMM = /^([01]\d|2[0-3]):[0-5]\d$/;
 export const PHONE = /^\+?[\d\s()-]{7,}$/;
 
 // Every field is optional so the same class serves updates; null clears a value.
@@ -75,6 +76,12 @@ export class UpdateProspectDto {
   @IsOptional()
   @Matches(YMD, { message: 'Pick a valid follow-up date' })
   nextDate?: string | null;
+
+  /** Local time on nextDate; null makes it an all-day follow-up. */
+  @IsOptional()
+  @ValidateIf((_, v) => v !== null)
+  @Matches(HHMM, { message: 'Pick a valid time' })
+  nextTime?: string | null;
 
   @IsOptional() @IsString() @MaxLength(4000) notes?: string | null;
 
@@ -178,6 +185,12 @@ export class LogActivityDto {
   @IsOptional()
   @Matches(YMD, { message: 'Pick a valid follow-up date' })
   nextDate?: string;
+
+  /** Time on nextDate; only used together with nextDate. */
+  @IsOptional()
+  @ValidateIf((_, v) => v !== null)
+  @Matches(HHMM, { message: 'Pick a valid time' })
+  nextTime?: string | null;
 
   /** Replaces the next action; empty string clears it. */
   @IsOptional() @IsString() @MaxLength(200) nextAction?: string;

@@ -23,6 +23,7 @@ import type { AuthUser, ClientInfo } from '../common/decorators';
 import { MailService } from '../mail/mail.service';
 import { DigestService } from './digest.service';
 import { PushService } from './push.service';
+import { ReminderService } from './reminder.service';
 
 class PushKeys {
   @IsString() @IsNotEmpty() @MaxLength(200) p256dh: string;
@@ -123,18 +124,21 @@ export class NotificationsController {
 
 /**
  * For hosts that sleep when idle (Render free tier): point an external scheduler
- * (cron-job.org, GitHub Actions) at POST /api/jobs/run every 15 minutes with the
- * header `x-cron-secret: <CRON_SECRET>`.
+ * (cron-job.org, GitHub Actions) at POST /api/jobs/run every 5 minutes with the
+ * header `x-cron-secret: <CRON_SECRET>`. Timed reminders need the 5-minute beat.
  */
 @Controller('jobs')
 export class JobsController {
-  constructor(private digest: DigestService) {}
+  constructor(
+    private digest: DigestService,
+    private reminders: ReminderService,
+  ) {}
 
   @Public()
-  @Throttle({ default: { limit: 10, ttl: 60_000 } })
+  @Throttle({ default: { limit: 20, ttl: 60_000 } })
   @Post('run')
   @HttpCode(200)
-  run(@Headers('x-cron-secret') secret?: string) {
+  async run(@Headers('x-cron-secret') secret?: string) {
     const expected = process.env.CRON_SECRET?.trim();
     const ok =
       !!expected &&
@@ -142,6 +146,10 @@ export class JobsController {
       secret.length === expected.length &&
       timingSafeEqual(Buffer.from(secret), Buffer.from(expected));
     if (!ok) throw new NotFoundException();
-    return this.digest.runDue();
+    const [digest, reminders] = await Promise.all([
+      this.digest.runDue(),
+      this.reminders.runDue(),
+    ]);
+    return { ...digest, ...reminders };
   }
 }

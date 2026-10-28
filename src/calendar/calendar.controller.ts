@@ -15,7 +15,7 @@ import { Client, CurrentUser, Public } from '../common/decorators';
 import type { AuthUser, ClientInfo } from '../common/decorators';
 import { PrismaService } from '../prisma/prisma.service';
 import { AuditService } from '../audit/audit.service';
-import { addDays, todayIn } from '../common/dates';
+import { addDays, instantOf, todayIn } from '../common/dates';
 import { buildCalendar } from './ics';
 
 const appUrl = () =>
@@ -87,7 +87,7 @@ export class CalendarController {
     if (!/^[A-Za-z0-9_-]{20,}$/.test(token)) throw new NotFoundException();
     const user = await this.prisma.user.findUnique({
       where: { calendarToken: token },
-      select: { id: true, timezone: true },
+      select: { id: true, timezone: true, reminderLead: true },
     });
     if (!user) throw new NotFoundException();
 
@@ -108,12 +108,21 @@ export class CalendarController {
         phone: true,
         nextAction: true,
         nextDate: true,
+        nextTime: true,
       },
     });
     const events = prospects.map((p) => ({
       // Stable per prospect, so a moved follow-up moves the event instead of duplicating it.
       uid: `followup-${p.id}@coverage`,
       date: p.nextDate!.toISOString().slice(0, 10),
+      start: p.nextTime
+        ? instantOf(
+            p.nextDate!.toISOString().slice(0, 10),
+            p.nextTime,
+            user.timezone,
+          )
+        : undefined,
+      alarmMinutes: user.reminderLead >= 0 ? user.reminderLead : undefined,
       summary: `${p.nextAction || 'Follow up'}: ${p.name}`,
       description: [p.company, p.phone, `${appUrl()}/?p=${p.id}`]
         .filter(Boolean)

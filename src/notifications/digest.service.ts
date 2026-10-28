@@ -5,6 +5,7 @@ import { DashboardService } from '../dashboard/dashboard.service';
 import { MailService, escapeHtml } from '../mail/mail.service';
 import { todayIn } from '../common/dates';
 import { PushService } from './push.service';
+import { clock } from '../common/dates';
 
 const appUrl = () =>
   (
@@ -100,9 +101,13 @@ export class DigestService {
         if (hour < u.digestHour || hour >= 12) continue;
 
         if ((u.digestEmail || u.digestPush) && u.lastDigestOn !== today) {
-          // Claim first so overlapping runs can't send twice.
+          // Claim first so overlapping runs can't send twice. NOT on its own
+          // never matches NULL, which would skip everyone's first digest.
           const { count } = await this.prisma.user.updateMany({
-            where: { id: u.id, NOT: { lastDigestOn: today } },
+            where: {
+              id: u.id,
+              OR: [{ lastDigestOn: null }, { lastDigestOn: { not: today } }],
+            },
             data: { lastDigestOn: today },
           });
           if (count) {
@@ -120,7 +125,10 @@ export class DigestService {
           u.lastReportOn !== today
         ) {
           const { count } = await this.prisma.user.updateMany({
-            where: { id: u.id, NOT: { lastReportOn: today } },
+            where: {
+              id: u.id,
+              OR: [{ lastReportOn: null }, { lastReportOn: { not: today } }],
+            },
             data: { lastReportOn: today },
           });
           if (count) {
@@ -150,12 +158,18 @@ export class DigestService {
         .slice(0, 3)
         .map((p) => p.name)
         .join(', ');
+      const booked = t.appointments
+        .slice(0, 3)
+        .map((p) => `${clock(p.nextTime!)} ${p.name}`)
+        .join(', ');
       await this.push.send(userId, {
         title: due
           ? `${due} follow-up${due === 1 ? '' : 's'} today${t.overdue.length ? ` (${t.overdue.length} overdue)` : ''}`
           : 'Nothing due today',
         body: due
-          ? `Start with ${top}.`
+          ? [booked && `Booked: ${booked}.`, `Start with ${top}.`]
+              .filter(Boolean)
+              .join(' ')
           : 'A good day to add new prospects or plan next steps.',
         url: '/',
         tag: 'digest',
@@ -168,7 +182,7 @@ export class DigestService {
         .map(
           (p) => `<tr>
 <td style="padding:8px 0;border-bottom:1px solid #eef1f3"><a href="${appUrl()}/?p=${p.id}" style="color:#1f2d35;font-weight:600;text-decoration:none">${escapeHtml(p.name)}</a><br><span style="color:#5b6b74;font-size:12px">${escapeHtml(p.nextAction || 'Follow up')} · ${STAGE_LABEL[p.stage]}</span></td>
-<td style="padding:8px 0;border-bottom:1px solid #eef1f3;text-align:right;font-size:12px;color:${p.nextDate && p.nextDate < t.today ? '#c62828' : '#5b6b74'}">${p.nextDate && p.nextDate < t.today ? 'Overdue' : 'Today'}${p.potential ? `<br>${naira(p.potential)}` : ''}</td></tr>`,
+<td style="padding:8px 0;border-bottom:1px solid #eef1f3;text-align:right;font-size:12px;color:${p.nextDate && p.nextDate < t.today ? '#c62828' : '#5b6b74'}">${p.nextDate && p.nextDate < t.today ? 'Overdue' : p.nextTime ? clock(p.nextTime) : 'Today'}${p.potential ? `<br>${naira(p.potential)}` : ''}</td></tr>`,
         )
         .join('');
       const extras = [
@@ -196,7 +210,10 @@ export class DigestService {
             : 'Nothing is due today.',
           ...t.focus
             .slice(0, 10)
-            .map((p) => `- ${p.name}: ${p.nextAction || 'Follow up'}`),
+            .map(
+              (p) =>
+                `- ${p.name}: ${p.nextAction || 'Follow up'}${p.nextTime && p.nextDate === t.today ? ` at ${clock(p.nextTime)}` : ''}`,
+            ),
           '',
           `Open Coverage: ${appUrl()}`,
         ].join('\n'),
