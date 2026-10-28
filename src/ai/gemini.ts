@@ -41,11 +41,20 @@ export async function geminiGenerate(opts: {
   system?: string;
   jsonSchema?: object;
   maxTokens?: number;
+  /** Longest wait for one attempt. */
   timeoutMs?: number;
+  /** Longest wait in all, across retries and backup models. */
+  deadlineMs?: number;
 }) {
   const main = env('GEMINI_MODEL') ?? 'gemini-3.8-flash';
-  // An older model that's usually less busy, for when the main one is overloaded.
-  const fallback = env('GEMINI_FALLBACK_MODEL') ?? 'gemini-2.5-flash';
+  // Other free models to try when the main one is overloaded. Ones Google
+  // doesn't offer to this key (404) are skipped.
+  const backups = (
+    env('GEMINI_FALLBACK_MODEL') ?? 'gemini-3.6-flash,gemini-3.5-flash-lite'
+  )
+    .split(',')
+    .map((m) => m.trim())
+    .filter((m) => m && m !== main);
   const base =
     env('GEMINI_BASE_URL') ?? 'https://generativelanguage.googleapis.com';
   const body = JSON.stringify({
@@ -62,47 +71,54 @@ export async function geminiGenerate(opts: {
     },
   });
 
-  // Google answers 429/500/503/504 when it's busy; those usually pass in seconds.
-  const plan =
-    fallback === main ? [main, main, main] : [main, main, fallback, fallback];
+  // Busy answers (429/5xx) usually pass in seconds, so the main model gets a
+  // second try; a model that hangs until the timeout doesn't.
+  const plan = [main, main, ...backups];
+  const deadline = Date.now() + (opts.deadlineMs ?? 4 * 60_000);
   let res: Response | undefined;
   let detail = '';
+  let timedOut = false;
   for (let i = 0; i < plan.length; i++) {
-    if (i > 0) await new Promise((r) => setTimeout(r, i === 1 ? 1500 : 3000));
+    const model = plan[i];
+    if (i === 1 && timedOut) continue;
+    if (i === 1) await new Promise((r) => setTimeout(r, 2000));
+    const left = deadline - Date.now();
+    if (left < 10_000) break;
     try {
-      res = await fetch(`${base}/v1beta/models/${plan[i]}:generateContent`, {
+      res = await fetch(`${base}/v1beta/models/${model}:generateContent`, {
         method: 'POST',
         headers: {
           'x-goog-api-key': env('GEMINI_API_KEY') ?? '',
           'Content-Type': 'application/json',
         },
         body,
-        signal: AbortSignal.timeout(opts.timeoutMs ?? 120_000),
+        signal: AbortSignal.timeout(Math.min(opts.timeoutMs ?? 90_000, left)),
       });
     } catch (e) {
-      log.warn(`${plan[i]}: ${(e as Error).message}`);
+      const err = e as Error;
+      timedOut = err.name === 'TimeoutError' || /timeout/i.test(err.message);
+      log.warn(`${model}: ${err.message}`);
       res = undefined;
       continue;
     }
+    timedOut = false;
     if (res.ok) break;
     detail = (await res.text()).slice(0, 500);
-    log.warn(`${plan[i]} ${res.status}: ${detail.replace(/\s+/g, ' ')}`);
-    if (![429, 500, 503, 504].includes(res.status)) break;
+    log.warn(`${model} ${res.status}: ${detail.replace(/\s+/g, ' ')}`);
+    if (![404, 429, 500, 503, 504].includes(res.status)) break;
   }
 
-  if (!res)
-    throw new BadGatewayException(
-      'We couldn’t reach the assistant. Check your connection and try again.',
+  if (!res || (!res.ok && [404, 500, 503, 504].includes(res.status)))
+    throw new ServiceUnavailableException(
+      timedOut || res
+        ? 'Google’s AI is very busy right now and didn’t answer in time. Please try again in a few minutes.'
+        : 'We couldn’t reach the assistant. Check your connection and try again.',
     );
   if (!res.ok) {
     if (res.status === 429)
       throw new HttpException(
         'The assistant is busy right now (free plan limit). Try again in a minute.',
         HttpStatus.TOO_MANY_REQUESTS,
-      );
-    if (res.status === 503 || res.status === 500 || res.status === 504)
-      throw new ServiceUnavailableException(
-        'Google’s AI is overloaded right now. Please try again in a minute.',
       );
     if (
       res.status === 401 ||

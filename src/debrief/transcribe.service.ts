@@ -188,7 +188,9 @@ export class TranscribeService {
       ],
       // A 15-minute recording is ~2,500 words.
       maxTokens: 12000,
-      timeoutMs: 180_000,
+      timeoutMs: 100_000,
+      // Inside the debrief's 6-minute limit for each step.
+      deadlineMs: 4 * 60_000,
     });
     return text;
   }
