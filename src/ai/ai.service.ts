@@ -13,6 +13,7 @@ import { betaZodOutputFormat } from '@anthropic-ai/sdk/helpers/beta/zod';
 import { z } from 'zod';
 import { PrismaService } from '../prisma/prisma.service';
 import { todayIn } from '../common/dates';
+import { geminiConfigured, geminiGenerate, type GeminiPart } from './gemini';
 
 const MODEL = 'claude-opus-5-5';
 
@@ -256,9 +257,12 @@ const WEEKDAY = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 
 export type Channel = 'WHATSAPP' | 'EMAIL' | 'SMS';
 
+type AiProvider = 'anthropic' | 'gemini';
+
 /**
- * Claude-powered helpers. Needs ANTHROPIC_API_KEY on the server. Prospect details
- * are sent to Anthropic's API to generate each answer.
+ * AI helpers. Needs ANTHROPIC_API_KEY (Claude) or GEMINI_API_KEY (Google
+ * Gemini) on the server; AI_PROVIDER picks one when both are set. Prospect
+ * details are sent to that provider to generate each answer.
  */
 @Injectable()
 export class AiService {
@@ -267,8 +271,17 @@ export class AiService {
 
   constructor(private prisma: PrismaService) {}
 
+  get provider(): AiProvider | null {
+    const claude = !!process.env.ANTHROPIC_API_KEY?.trim();
+    const gemini = geminiConfigured();
+    const chosen = process.env.AI_PROVIDER?.trim().toLowerCase();
+    if (chosen === 'gemini' && gemini) return 'gemini';
+    if (chosen === 'anthropic' && claude) return 'anthropic';
+    return claude ? 'anthropic' : gemini ? 'gemini' : null;
+  }
+
   get configured() {
-    return !!process.env.ANTHROPIC_API_KEY?.trim();
+    return this.provider !== null;
   }
 
   private get anthropic() {
@@ -286,6 +299,8 @@ export class AiService {
     content: Anthropic.Beta.BetaContentBlockParam[] | string,
     opts: { effort?: 'low' | 'medium'; maxTokens?: number } = {},
   ): Promise<T> {
+    if (this.provider === 'gemini')
+      return this.askGemini(schema, content, opts);
     try {
       const res = await this.anthropic.beta.messages.parse({
         model: MODEL,
@@ -342,6 +357,57 @@ export class AiService {
       }
       throw e;
     }
+  }
+
+  /** The same structured call through Gemini; the answer is checked against the schema. */
+  private async askGemini<T>(
+    schema: z.ZodType<T>,
+    content: Anthropic.Beta.BetaContentBlockParam[] | string,
+    opts: { maxTokens?: number },
+  ): Promise<T> {
+    const parts: GeminiPart[] =
+      typeof content === 'string'
+        ? [{ text: content }]
+        : content.flatMap((b): GeminiPart[] =>
+            b.type === 'text'
+              ? [{ text: b.text }]
+              : b.type === 'image' && b.source.type === 'base64'
+                ? [
+                    {
+                      inlineData: {
+                        mimeType: b.source.media_type,
+                        data: b.source.data,
+                      },
+                    },
+                  ]
+                : [],
+          );
+    const jsonSchema = z.toJSONSchema(schema, { target: 'draft-7' });
+    delete (jsonSchema as { $schema?: string }).$schema;
+    const text = await geminiGenerate({
+      parts,
+      system: SYSTEM,
+      jsonSchema,
+      maxTokens: opts.maxTokens ?? 8000,
+    });
+    let data: unknown;
+    try {
+      data = JSON.parse(text);
+    } catch {
+      throw new BadGatewayException(
+        'The assistant gave an incomplete answer. Please try again.',
+      );
+    }
+    const parsed = schema.safeParse(data);
+    if (!parsed.success) {
+      this.log.error(
+        `Gemini answer didn't fit: ${parsed.error.message.slice(0, 300)}`,
+      );
+      throw new BadGatewayException(
+        'The assistant gave an answer we couldn’t use. Please try again.',
+      );
+    }
+    return parsed.data;
   }
 
   /** Everything known about a prospect, as text for the model. */

@@ -1,14 +1,16 @@
 import {
   BadGatewayException,
+  HttpException,
   Injectable,
   Logger,
   ServiceUnavailableException,
   UnprocessableEntityException,
 } from '@nestjs/common';
+import { geminiConfigured, geminiGenerate } from '../ai/gemini';
 
 const env = (k: string) => process.env[k]?.trim() || undefined;
 
-type Provider = 'deepgram' | 'openai';
+type Provider = 'deepgram' | 'openai' | 'gemini';
 
 /** File extension each provider uses to recognise the recording's format. */
 const EXT: Record<string, string> = {
@@ -26,11 +28,20 @@ const EXT: Record<string, string> = {
 
 export const AUDIO_TYPES = Object.keys(EXT);
 
+/** Gemini's names for the formats browsers record in. */
+const GEMINI_TYPE: Record<string, string> = {
+  'video/webm': 'audio/webm',
+  'audio/mp4': 'audio/m4a',
+  'video/mp4': 'audio/m4a',
+  'audio/x-m4a': 'audio/m4a',
+  'audio/x-wav': 'audio/wav',
+};
+
 /**
  * Speech to text for voice debriefs. Deepgram (DEEPGRAM_API_KEY) is preferred:
  * it takes a list of names to listen for and keeps no audio after processing.
- * OpenAI (OPENAI_API_KEY) works too. TRANSCRIBE_PROVIDER picks one when both
- * keys are set. Audio goes straight to the provider and is never stored here.
+ * OpenAI (OPENAI_API_KEY) and Google Gemini (GEMINI_API_KEY, which has a free
+ * tier) work too. TRANSCRIBE_PROVIDER picks one when several keys are set. Audio goes straight to the provider and is never stored here.
  */
 @Injectable()
 export class TranscribeService {
@@ -40,8 +51,10 @@ export class TranscribeService {
     const chosen = env('TRANSCRIBE_PROVIDER')?.toLowerCase();
     if (chosen === 'openai' && env('OPENAI_API_KEY')) return 'openai';
     if (chosen === 'deepgram' && env('DEEPGRAM_API_KEY')) return 'deepgram';
+    if (chosen === 'gemini' && geminiConfigured()) return 'gemini';
     if (env('DEEPGRAM_API_KEY')) return 'deepgram';
     if (env('OPENAI_API_KEY')) return 'openai';
+    if (geminiConfigured()) return 'gemini';
     return null;
   }
 
@@ -68,9 +81,11 @@ export class TranscribeService {
       text =
         provider === 'deepgram'
           ? await this.deepgram(audio, type, hints)
-          : await this.openai(audio, type, hints);
+          : provider === 'gemini'
+            ? await this.gemini(audio, type, hints)
+            : await this.openai(audio, type, hints);
     } catch (e) {
-      if (e instanceof ServiceUnavailableException) throw e;
+      if (e instanceof HttpException) throw e;
       this.log.error(`${provider}: ${(e as Error).message}`);
       throw new BadGatewayException(
         'We couldn’t turn the recording into text. Please try again.',
@@ -152,6 +167,30 @@ export class TranscribeService {
     if (res.status === 401 || res.status === 403) throw this.badKey('OpenAI');
     if (!res.ok) throw new Error(`${res.status} ${await res.text()}`);
     return ((await res.json()) as { text?: string }).text ?? '';
+  }
+
+  private async gemini(audio: Buffer, type: string, hints: string[]) {
+    const text = await geminiGenerate({
+      parts: [
+        {
+          inlineData: {
+            mimeType: GEMINI_TYPE[type] ?? type,
+            data: audio.toString('base64'),
+          },
+        },
+        {
+          text: `Transcribe this recording word for word. It is a Nigerian bank relationship manager talking about customers and prospects. Write naira amounts as said (e.g. "20 million"). Return only the transcript, in paragraphs, with no headings or commentary.${
+            hints.length
+              ? ` Names that may come up: ${hints.join(', ').slice(0, 1500)}.`
+              : ''
+          }`,
+        },
+      ],
+      // A 15-minute recording is ~2,500 words.
+      maxTokens: 12000,
+      timeoutMs: 180_000,
+    });
+    return text;
   }
 
   private badKey(name: string) {
