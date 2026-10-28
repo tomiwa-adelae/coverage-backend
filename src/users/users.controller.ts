@@ -85,6 +85,11 @@ class UpdateMeDto {
   @IsIn(REMINDER_LEADS, { message: 'Pick when to be reminded' })
   reminderLead?: number;
 
+  /** Local hour for the "Debrief your day" push on working days; -1 = off. */
+  @IsOptional()
+  @IsIn([-1, 16, 17, 18, 19, 20], { message: 'Pick a debrief reminder time' })
+  debriefHour?: number;
+
   @IsOptional()
   @IsInt({ message: 'Daily goal must be a whole number' })
   @Min(1, { message: 'Daily goal must be at least 1' })
@@ -126,6 +131,7 @@ const view = (u: User) => ({
   managerEmail: u.managerEmail,
   weeklyReport: u.weeklyReport,
   reminderLead: u.reminderLead,
+  debriefHour: u.debriefHour,
   twoFactorEnabled: u.twoFactorEnabled,
   teamId: u.teamId,
   teamRole: u.teamRole,
@@ -174,6 +180,7 @@ export class UsersController {
         managerEmail: blankToNull(dto.managerEmail),
         weeklyReport: dto.weeklyReport,
         reminderLead: dto.reminderLead,
+        debriefHour: dto.debriefHour,
       },
     });
     return view(u);

@@ -128,6 +128,9 @@ model User {
   lastDigestOn     String?
   // Push reminder this many minutes before a follow-up that has a time
   reminderLead     Int      @default(30)
+  // "Debrief your day" push on working days at this local hour; -1 is off
+  debriefHour      Int      @default(17)
+  lastDebriefNudgeOn String?
   // Weekly report emailed on Monday mornings
   managerEmail     String?
   weeklyReport     Boolean  @default(false)
@@ -247,6 +250,8 @@ model Prospect {
   nextTime      String?
   // "YYYY-MM-DD HH:MM" of the follow-up a reminder was last sent for
   remindedFor   String?
+  // "How did it go?" push sent after this booked follow-up, same key format
+  checkedInFor  String?
   notes         String?
   lastContactAt DateTime?
   // When the prospect entered its current stage, for stale alerts
