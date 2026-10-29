@@ -131,6 +131,8 @@ model User {
   // "Debrief your day" push on working days at this local hour; -1 is off
   debriefHour      Int      @default(17)
   lastDebriefNudgeOn String?
+  // "YYYY-MM" the "update this month's balances" push was sent for
+  lastBalanceNudge String?
   // Weekly report emailed on Monday mornings
   managerEmail     String?
   weeklyReport     Boolean  @default(false)
@@ -253,6 +255,8 @@ model Prospect {
   remindedFor   String?
   // "How did it go?" push sent after this booked follow-up, same key format
   checkedInFor  String?
+  // When they were last asked for a referral (customer care)
+  referralAskedAt DateTime?
   notes         String?
   lastContactAt DateTime?
   // When the prospect entered its current stage, for stale alerts
@@ -406,6 +410,8 @@ model Task {
   // Set on items of an account-opening checklist: INDIVIDUAL or BUSINESS
   checklist  String?
   position   Int       @default(0)
+  // What made it, so it isn't made twice (e.g. "balance-drop:<id>:2026-10")
+  source     String?
   doneAt     DateTime?
   createdAt  DateTime  @default(now())
   updatedAt  DateTime  @updatedAt
@@ -415,4 +421,5 @@ model Task {
 
   @@index([ownerId, doneAt, dueDate])
   @@index([prospectId])
+  @@index([ownerId, source])
 }

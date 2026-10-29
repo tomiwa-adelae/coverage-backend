@@ -25,6 +25,7 @@ import { CadencesService } from '../cadences/cadences.service';
 import { parseSteps, stepDue } from '../cadences/cadences';
 import { toCsv } from '../common/csv';
 import { serializeTask, TasksService } from '../tasks/tasks.service';
+import { balanceDrops, careDays, looksLikeBusiness } from './care';
 
 /** Default follow-up gap after a contact, by tier. Unrated prospects get a week. */
 export const FOLLOW_UP_DAYS: Record<Tier, number> = { A: 7, B: 14, C: 30 };
@@ -118,14 +119,9 @@ export class ProspectsService {
 
   /** Forms are out: list the documents still to collect. */
   private async startChecklist(ownerId: string, p: Prospect) {
-    // A company name that reads like a business, or business products, means
-    // the business list; otherwise the personal one. It can be swapped.
-    const business =
-      /\b(ltd|limited|plc|enterprises?|ventures|nig(eria)?|company|co\.|global|services|stores|industries|group|associates|int'?l)\b/i.test(
-        p.name,
-      ) || p.wantsProducts.some((x) => ['POS', 'PAYROLL', 'TRADE'].includes(x));
+    // A business by name or products gets the business list; it can be swapped.
     await this.tasks
-      .checklistOnFormsSent(ownerId, p.id, business)
+      .checklistOnFormsSent(ownerId, p.id, looksLikeBusiness(p))
       .catch(() => {});
   }
 
@@ -345,6 +341,12 @@ export class ProspectsService {
       include: { cadence: true },
     });
     if (!current) throw new NotFoundException('Prospect not found');
+    // Sent again after a dropped connection: it's already saved.
+    if (
+      dto.clientId &&
+      (await this.prisma.activity.count({ where: { id: dto.clientId } }))
+    )
+      return this.get(ownerId, id);
     const user = await this.prisma.user.findUniqueOrThrow({
       where: { id: ownerId },
       select: { timezone: true },
@@ -357,6 +359,7 @@ export class ProspectsService {
     const ops: Prisma.PrismaPromise<unknown>[] = [
       this.prisma.activity.create({
         data: {
+          id: dto.clientId,
           prospectId: id,
           userId: ownerId,
           type: dto.type,
@@ -415,7 +418,13 @@ export class ProspectsService {
       data.nextDate = toDate(planned.nextDate);
       data.nextTime = null;
     } else if (!next || next <= today) {
-      const gap = current.tier ? FOLLOW_UP_DAYS[current.tier] : 7;
+      // Customers who've funded are looked after less often than prospects.
+      const gap =
+        current.stage === Stage.FUNDED
+          ? careDays(current.tier)
+          : current.tier
+            ? FOLLOW_UP_DAYS[current.tier]
+            : 7;
       data.nextDate = toDate(addDays(today, gap));
       data.nextTime = null;
     }
@@ -681,6 +690,54 @@ export class ProspectsService {
           ]
         : []),
     ]);
+    await this.flagBalanceDrop(ownerId, p).catch(() => {});
+  }
+
+  /** A sharp fall in a customer's balance becomes a to-do to call them. */
+  private async flagBalanceDrop(ownerId: string, p: Prospect) {
+    const rows = await this.prisma.balance.findMany({
+      where: { prospectId: p.id },
+      orderBy: { month: 'desc' },
+      take: 2,
+    });
+    const user = await this.prisma.user.findUniqueOrThrow({
+      where: { id: ownerId },
+      select: { timezone: true },
+    });
+    const today = todayIn(user.timezone);
+    const lastMonth = monthOf(addDays(`${monthOf(today)}-01`, -1));
+    const [drop] = balanceDrops(
+      rows.map((r) => ({
+        prospectId: r.prospectId,
+        month: monthOf(r.month.toISOString()),
+        amount: Number(r.amount),
+      })),
+      lastMonth,
+    );
+    if (!drop) return;
+    const source = `balance-drop:${p.id}:${drop.month}`;
+    if (await this.prisma.task.count({ where: { ownerId, source } })) return;
+    const m = Math.round(drop.drop / 100_000) / 10;
+    await this.prisma.task.create({
+      data: {
+        ownerId,
+        prospectId: p.id,
+        source,
+        title: `Call ${p.name}: balance down ₦${m}m. Find out why and how to win it back`,
+        dueDate: toDate(today),
+      },
+    });
+  }
+
+  /** Marks that they've been asked for a referral (or clears it). */
+  async setReferralAsked(ownerId: string, id: string, asked: boolean) {
+    await this.owned(ownerId, id);
+    return serializeProspect(
+      await this.prisma.prospect.update({
+        where: { id },
+        data: { referralAskedAt: asked ? new Date() : null },
+      }),
+    );
   }
 
   // ------------------------------------------------------------ import / export

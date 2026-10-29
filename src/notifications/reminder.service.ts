@@ -48,13 +48,21 @@ export class ReminderService {
 
   async runDue(now = new Date()) {
     if (this.running || !this.push.configured)
-      return { reminders: 0, taskReminders: 0, checkIns: 0, debriefNudges: 0 };
+      return {
+        reminders: 0,
+        taskReminders: 0,
+        checkIns: 0,
+        debriefNudges: 0,
+        balanceNudges: 0,
+      };
     this.running = true;
     let reminders = 0;
     let checkIns = 0;
     let debriefNudges = 0;
     let taskReminders = 0;
+    let balanceNudges = 0;
     try {
+      balanceNudges = await this.balanceNudges(now);
       taskReminders = await this.taskReminders(now);
       checkIns = await this.checkIns(now);
       debriefNudges = await this.debriefNudges(now);
@@ -132,7 +140,65 @@ export class ReminderService {
     } finally {
       this.running = false;
     }
-    return { reminders, taskReminders, checkIns, debriefNudges };
+    return { reminders, taskReminders, checkIns, debriefNudges, balanceNudges };
+  }
+
+  /**
+   * In the first working week of a month, one push to enter last month's
+   * closing balances, while customers are missing this month's figure.
+   */
+  private async balanceNudges(now: Date) {
+    const users = await this.prisma.user.findMany({
+      where: { pushSubs: { some: {} } },
+      select: { id: true, timezone: true, lastBalanceNudge: true },
+    });
+    let sent = 0;
+    for (const u of users) {
+      const today = localDate(u.timezone, now);
+      const month = today.slice(0, 7);
+      const hour = localHour(u.timezone, now);
+      if (
+        u.lastBalanceNudge === month ||
+        Number(today.slice(8)) > 7 ||
+        isWeekend(today) ||
+        hour < 9 ||
+        hour >= 17
+      )
+        continue;
+      const customers = await this.prisma.prospect.findMany({
+        where: { ownerId: u.id, balances: { some: {} } },
+        select: { balances: { orderBy: { month: 'desc' }, take: 1 } },
+      });
+      const missing = customers.filter(
+        (c) => c.balances[0]?.month.toISOString().slice(0, 7) !== month,
+      ).length;
+      if (!missing) continue;
+      const { count } = await this.prisma.user.updateMany({
+        where: {
+          id: u.id,
+          OR: [
+            { lastBalanceNudge: null },
+            { lastBalanceNudge: { not: month } },
+          ],
+        },
+        data: { lastBalanceNudge: month },
+      });
+      if (!count) continue;
+      await this.push
+        .send(
+          u.id,
+          {
+            title: 'Update this month’s balances',
+            body: `${missing} customer${missing === 1 ? ' has' : 's have'} no balance for this month yet.`,
+            url: '/balances',
+            tag: 'balance-nudge',
+          },
+          { ttl: 8 * 60 * 60, urgency: 'normal' },
+        )
+        .catch((e: Error) => this.log.error(`balance nudge: ${e.message}`));
+      sent++;
+    }
+    return sent;
   }
 
   /** To-dos with a time, `reminderLead` minutes before, like follow-ups. */

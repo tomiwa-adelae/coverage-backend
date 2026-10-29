@@ -17,6 +17,11 @@ export class DashboardController {
     return this.dashboard.progress(user.sub);
   }
 
+  @Get('customers')
+  customers(@CurrentUser() user: AuthUser) {
+    return this.dashboard.customers(user.sub);
+  }
+
   @Get('target')
   target(@CurrentUser() user: AuthUser) {
     return this.dashboard.target(user.sub);

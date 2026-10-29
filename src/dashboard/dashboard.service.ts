@@ -10,6 +10,12 @@ import {
 } from '../common/dates';
 import { byPriority } from '../prospects/prospects.service';
 import { serializeProspect } from '../prospects/prospect.serializer';
+import {
+  REFERRAL_AFTER_DAYS,
+  balanceDrops,
+  careDays,
+  crossSellIdeas,
+} from '../prospects/care';
 import { goalStreak } from './streak';
 import {
   STALE_AFTER_DAYS,
@@ -112,6 +118,109 @@ export class DashboardService {
     };
   }
 
+  /**
+   * Looking after funded customers: sharp balance drops, who's due a
+   * check-in, who to ask for a referral, and what to offer them next.
+   */
+  async customers(userId: string) {
+    const user = await this.prisma.user.findUniqueOrThrow({
+      where: { id: userId },
+      select: { timezone: true },
+    });
+    const today = todayIn(user.timezone);
+    const lastMonth = ym(addDays(`${ym(today)}-01`, -1));
+    const [all, balances, suggested] = await Promise.all([
+      this.prisma.prospect.findMany({
+        where: { ownerId: userId, stage: { not: Stage.DECLINED } },
+        include: { _count: { select: { referrals: true } } },
+      }),
+      this.prisma.balance.findMany({
+        where: { userId },
+        select: { prospectId: true, month: true, amount: true },
+      }),
+      // Ideas already turned into a to-do (open, or done in the last 90 days).
+      this.prisma.task.findMany({
+        where: {
+          ownerId: userId,
+          source: { startsWith: 'cross-sell:' },
+          OR: [
+            { doneAt: null },
+            { doneAt: { gte: startOfDay(addDays(today, -90), user.timezone) } },
+          ],
+        },
+        select: { source: true },
+      }),
+    ]);
+    const byId = new Map(all.map((p) => [p.id, p]));
+    const view = (p: (typeof all)[number]) => ({
+      ...serializeProspect(p),
+      referrals: p._count.referrals,
+    });
+    const daysSince = (d: Date) =>
+      Math.floor((Date.now() - d.getTime()) / 86_400_000);
+    const customers = all.filter((p) => p.stage === Stage.FUNDED);
+    const byBalance = (a: Prospect, b: Prospect) =>
+      Number(b.funded ?? 0) - Number(a.funded ?? 0);
+
+    const drops = balanceDrops(
+      balances.map((b) => ({
+        prospectId: b.prospectId,
+        month: ym(day(b.month)!),
+        amount: Number(b.amount),
+      })),
+      lastMonth,
+    )
+      .filter((d) => byId.has(d.prospectId))
+      .map((d) => ({ ...d, prospect: view(byId.get(d.prospectId)!) }));
+
+    // Nothing booked and longer than their tier's interval since last contact.
+    // (Booked ones that are due already show on Today.)
+    const checkIns = customers
+      .filter((p) => !p.nextDate)
+      .map((p) => ({
+        p,
+        since: daysSince(p.lastContactAt ?? p.stageChangedAt),
+      }))
+      .filter(({ p, since }) => since >= careDays(p.tier))
+      .sort((a, b) => byBalance(a.p, b.p))
+      .map(({ p, since }) => ({
+        ...view(p),
+        daysSinceContact: since,
+        careDays: careDays(p.tier),
+      }));
+
+    const referralAsks = customers
+      .filter(
+        (p) =>
+          !p.referralAskedAt &&
+          daysSince(p.stageChangedAt) >= REFERRAL_AFTER_DAYS,
+      )
+      .sort(byBalance)
+      .map((p) => ({
+        ...view(p),
+        fundedDays: daysSince(p.stageChangedAt),
+      }));
+
+    const taken = new Set(suggested.map((t) => t.source));
+    const crossSell = customers
+      .sort(byBalance)
+      .flatMap((p) =>
+        crossSellIdeas({
+          name: p.name,
+          funded: num(p.funded),
+          wantsProducts: p.wantsProducts,
+          holdsProducts: p.holdsProducts,
+        })
+          .filter((i) => !taken.has(`cross-sell:${p.id}:${i.product}`))
+          // Two at a time per person, so one customer doesn't fill the list.
+          .slice(0, 2)
+          .map((i) => ({ ...i, prospect: view(p) })),
+      )
+      .slice(0, 40);
+
+    return { today, drops, checkIns, referralAsks, crossSell };
+  }
+
   /** Everything the RM should act on, ranked by what it is likely to be worth. */
   async today(userId: string) {
     const user = await this.prisma.user.findUniqueOrThrow({
@@ -183,7 +292,10 @@ export class DashboardService {
 
     const out = (list: Prospect[], sort = byPriority) =>
       list.sort(sort).map(serializeProspect);
-    const target = await this.target(userId);
+    const [target, care] = await Promise.all([
+      this.target(userId),
+      this.customers(userId),
+    ]);
     return {
       today,
       touchesToday: counts[today] ?? 0,
@@ -220,6 +332,13 @@ export class DashboardService {
       })),
       staleCount: stale.length,
       birthdays,
+      balanceDrops: care.drops.slice(0, 5),
+      care: {
+        drops: care.drops.length,
+        checkIns: care.checkIns.length,
+        referralAsks: care.referralAsks.length,
+        crossSell: care.crossSell.length,
+      },
     };
   }
 

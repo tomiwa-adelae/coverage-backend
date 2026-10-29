@@ -22,6 +22,7 @@ import {
   ImportProspectsDto,
   ListProspectsQuery,
   LogActivityDto,
+  ReferralAskedDto,
   MonthQuery,
   SendEmailDto,
   SendSmsDto,
@@ -113,6 +114,16 @@ export class ProspectsController {
     @Body() dto: LogActivityDto,
   ) {
     return this.prospects.logActivity(user.sub, id, dto);
+  }
+
+  @Post(':id/referral-asked')
+  @HttpCode(200)
+  referralAsked(
+    @CurrentUser() user: AuthUser,
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: ReferralAskedDto,
+  ) {
+    return this.prospects.setReferralAsked(user.sub, id, dto.asked);
   }
 
   @Throttle({ default: { limit: 20, ttl: 60_000 } })

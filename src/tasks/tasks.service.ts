@@ -74,8 +74,17 @@ export class TasksService {
 
   async create(ownerId: string, dto: CreateTaskDto) {
     if (dto.prospectId) await this.ownedProspect(ownerId, dto.prospectId);
+    if (dto.id) {
+      const sent = await this.prisma.task.findFirst({
+        where: { id: dto.id, ownerId },
+        include: withProspect,
+      });
+      if (sent) return serializeTask(sent);
+    }
     const t = await this.prisma.task.create({
       data: {
+        id: dto.id,
+        source: dto.source,
         ownerId,
         title: dto.title.trim(),
         prospectId: dto.prospectId ?? null,

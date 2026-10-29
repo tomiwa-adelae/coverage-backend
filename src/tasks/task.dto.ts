@@ -51,6 +51,14 @@ export class CreateTaskDto extends UpdateTaskDto {
   @IsNotEmpty({ message: 'Say what needs doing' })
   @MaxLength(200, { message: 'Keep it under 200 characters' })
   declare title: string;
+
+  /** Made on the phone so a to-do added offline isn't saved twice. */
+  @IsOptional() @IsUUID('4') id?: string;
+
+  /** What suggested it, e.g. "cross-sell:<prospect>:POS", so it isn't suggested again. */
+  @IsOptional()
+  @Matches(/^[a-z-]+:[\w:-]{1,120}$/)
+  source?: string;
 }
 
 export class ListTasksQuery {

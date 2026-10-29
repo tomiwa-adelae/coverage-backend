@@ -11,6 +11,7 @@ import { Type } from 'class-transformer';
 import {
   ArrayMaxSize,
   IsArray,
+  IsBoolean,
   IsEmail,
   IsEnum,
   IsIn,
@@ -194,6 +195,16 @@ export class LogActivityDto {
 
   /** Replaces the next action; empty string clears it. */
   @IsOptional() @IsString() @MaxLength(200) nextAction?: string;
+
+  /**
+   * Made on the phone, so a log saved offline and sent twice (a dropped
+   * connection) is only recorded once.
+   */
+  @IsOptional() @IsUUID('4') clientId?: string;
+}
+
+export class ReferralAskedDto {
+  @IsBoolean() asked: boolean;
 }
 
 export class SendEmailDto {
