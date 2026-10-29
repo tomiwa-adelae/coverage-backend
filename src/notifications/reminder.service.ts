@@ -48,12 +48,14 @@ export class ReminderService {
 
   async runDue(now = new Date()) {
     if (this.running || !this.push.configured)
-      return { reminders: 0, checkIns: 0, debriefNudges: 0 };
+      return { reminders: 0, taskReminders: 0, checkIns: 0, debriefNudges: 0 };
     this.running = true;
     let reminders = 0;
     let checkIns = 0;
     let debriefNudges = 0;
+    let taskReminders = 0;
     try {
+      taskReminders = await this.taskReminders(now);
       checkIns = await this.checkIns(now);
       debriefNudges = await this.debriefNudges(now);
       // Dates are stored without a timezone, so look a day either side of UTC today.
@@ -130,7 +132,62 @@ export class ReminderService {
     } finally {
       this.running = false;
     }
-    return { reminders, checkIns, debriefNudges };
+    return { reminders, taskReminders, checkIns, debriefNudges };
+  }
+
+  /** To-dos with a time, `reminderLead` minutes before, like follow-ups. */
+  private async taskReminders(now: Date) {
+    const utcToday = now.toISOString().slice(0, 10);
+    const due = await this.prisma.task.findMany({
+      where: {
+        doneAt: null,
+        dueTime: { not: null },
+        dueDate: {
+          gte: toDate(addDays(utcToday, -1)),
+          lte: toDate(addDays(utcToday, 1)),
+        },
+        owner: { reminderLead: { gte: 0 } },
+      },
+      select: {
+        id: true,
+        title: true,
+        dueDate: true,
+        dueTime: true,
+        remindedFor: true,
+        prospect: { select: { id: true, name: true } },
+        owner: { select: { id: true, timezone: true, reminderLead: true } },
+      },
+    });
+    let sent = 0;
+    for (const t of due) {
+      const ymd = t.dueDate!.toISOString().slice(0, 10);
+      const key = `${ymd} ${t.dueTime}`;
+      if (t.remindedFor === key) continue;
+      const at = instantOf(ymd, t.dueTime!, t.owner.timezone).getTime();
+      if (now.getTime() < at - t.owner.reminderLead * 60_000) continue;
+      const { count } = await this.prisma.task.updateMany({
+        where: {
+          id: t.id,
+          OR: [{ remindedFor: null }, { remindedFor: { not: key } }],
+        },
+        data: { remindedFor: key },
+      });
+      if (!count || now.getTime() > at + STALE_MS) continue;
+      await this.push
+        .send(
+          t.owner.id,
+          {
+            title: t.prospect ? `To do · ${t.prospect.name}` : 'To do',
+            body: `${clock(t.dueTime!)}: ${t.title}`,
+            url: t.prospect ? `/?p=${t.prospect.id}` : '/tasks',
+            tag: `task-${t.id}`,
+          },
+          { ttl: (at + 30 * 60_000 - now.getTime()) / 1000, urgency: 'high' },
+        )
+        .catch((e: Error) => this.log.error(`task ${t.id}: ${e.message}`));
+      sent++;
+    }
+    return sent;
   }
 
   /** After a booked follow-up, ask how it went if nothing has been logged. */

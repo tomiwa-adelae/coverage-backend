@@ -24,6 +24,7 @@ import { AuditService } from '../audit/audit.service';
 import { CadencesService } from '../cadences/cadences.service';
 import { parseSteps, stepDue } from '../cadences/cadences';
 import { toCsv } from '../common/csv';
+import { serializeTask, TasksService } from '../tasks/tasks.service';
 
 /** Default follow-up gap after a contact, by tier. Unrated prospects get a week. */
 export const FOLLOW_UP_DAYS: Record<Tier, number> = { A: 7, B: 14, C: 30 };
@@ -112,7 +113,21 @@ export class ProspectsService {
     private sms: SmsService,
     private audit: AuditService,
     private cadences: CadencesService,
+    private tasks: TasksService,
   ) {}
+
+  /** Forms are out: list the documents still to collect. */
+  private async startChecklist(ownerId: string, p: Prospect) {
+    // A company name that reads like a business, or business products, means
+    // the business list; otherwise the personal one. It can be swapped.
+    const business =
+      /\b(ltd|limited|plc|enterprises?|ventures|nig(eria)?|company|co\.|global|services|stores|industries|group|associates|int'?l)\b/i.test(
+        p.name,
+      ) || p.wantsProducts.some((x) => ['POS', 'PAYROLL', 'TRADE'].includes(x));
+    await this.tasks
+      .checklistOnFormsSent(ownerId, p.id, business)
+      .catch(() => {});
+  }
 
   async list(ownerId: string, query: ListProspectsQuery) {
     const where: Prisma.ProspectWhereInput = { ownerId };
@@ -177,13 +192,27 @@ export class ProspectsService {
         },
         balances: { orderBy: { month: 'desc' }, take: 24 },
         cadence: { select: { id: true, name: true, steps: true } },
+        tasks: {
+          include: {
+            prospect: { select: { id: true, name: true, company: true } },
+          },
+          orderBy: [{ position: 'asc' }, { createdAt: 'asc' }],
+        },
       },
     });
     if (!p)
       throw new NotFoundException(
         'We couldn’t find that prospect. It may have been deleted.',
       );
-    const { activities, referredBy, referrals, balances, cadence, ...rest } = p;
+    const {
+      activities,
+      referredBy,
+      referrals,
+      balances,
+      cadence,
+      tasks,
+      ...rest
+    } = p;
     const sameCompany = p.company
       ? await this.prisma.prospect.findMany({
           where: {
@@ -203,6 +232,7 @@ export class ProspectsService {
       referrals,
       sameCompany,
       cadence,
+      tasks: tasks.map(serializeTask),
       balances: balances.map((b) => ({
         month: monthOf(b.month.toISOString()),
         amount: Number(b.amount),
@@ -225,6 +255,7 @@ export class ProspectsService {
     });
     if (dto.cadenceId) await this.startCadence(ownerId, p, dto.cadenceId, dto);
     if (dto.funded) await this.syncCurrentBalance(ownerId, p.id, dto.funded);
+    if (p.stage === Stage.FORMS_SENT) await this.startChecklist(ownerId, p);
     return serializeProspect(
       await this.prisma.prospect.findUniqueOrThrow({ where: { id: p.id } }),
     );
@@ -267,6 +298,9 @@ export class ProspectsService {
           ]
         : []),
     ]);
+
+    if (stageChanged && dto.stage === Stage.FORMS_SENT)
+      await this.startChecklist(ownerId, p);
 
     if (dto.cadenceId !== undefined && dto.cadenceId !== current.cadenceId) {
       if (dto.cadenceId)

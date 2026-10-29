@@ -14,10 +14,11 @@ import { PrismaService } from '../prisma/prisma.service';
 import { AiService, DebriefReadingItem } from '../ai/ai.service';
 import { ProspectsService } from '../prospects/prospects.service';
 import { HHMM, UpdateProspectDto } from '../prospects/prospect.dto';
-import { addDays, startOfDay, todayIn } from '../common/dates';
+import { addDays, startOfDay, todayIn, toDate } from '../common/dates';
 import { TranscribeService } from './transcribe.service';
 import {
   ApplyDebriefDto,
+  ApplyTaskDto,
   CreateDebriefDto,
   ProcessDebriefDto,
 } from './debrief.dto';
@@ -63,6 +64,8 @@ interface UndoItem {
   before?: Record<string, unknown>;
   balances?: { id: string; month: string; amount: string }[];
   activityIds?: string[];
+  /** To-dos the save added. */
+  taskIds?: string[];
 }
 
 const DATE_FIELDS = new Set([
@@ -120,11 +123,21 @@ export interface Suggestion {
   nextAction: string;
   nextDate: string | null;
   nextTime: string | null;
+  /** Suggested to-dos for this person. */
+  tasks: SuggestedTask[];
   check: string[];
+}
+
+export interface SuggestedTask {
+  title: string;
+  dueDate: string | null;
+  dueTime: string | null;
 }
 
 export interface DebriefResult {
   items: Suggestion[];
+  /** Suggested general to-dos, not tied to anyone. */
+  tasks?: SuggestedTask[];
   other: string[];
 }
 
@@ -405,10 +418,15 @@ export class DebriefService {
           validDate(it.nextDate, today, -1, 400) && HHMM.test(it.nextTime)
             ? it.nextTime
             : null,
+        tasks: todosOf(it.todos, today),
         check: it.check.filter((c) => c.trim()),
       };
     });
-    return { items, other: reading.other.filter((o) => o.trim()) };
+    return {
+      items,
+      tasks: todosOf(reading.todos, today),
+      other: reading.other.filter((o) => o.trim()),
+    };
   }
 
   async get(userId: string, id: string) {
@@ -510,13 +528,17 @@ export class DebriefService {
           created = true;
           undo.push({ prospectId, created });
         } else {
-          const [before, balances, activities] = await Promise.all([
+          const [before, balances, activities, tasks] = await Promise.all([
             this.prisma.prospect.findFirst({
               where: { id: prospectId, ownerId: userId },
               select: RESTORABLE,
             }),
             this.prisma.balance.findMany({ where: { prospectId } }),
             this.prisma.activity.findMany({
+              where: { prospectId },
+              select: { id: true },
+            }),
+            this.prisma.task.findMany({
               where: { prospectId },
               select: { id: true },
             }),
@@ -533,6 +555,7 @@ export class DebriefService {
               })),
               // Swapped for the new ones once everything is saved.
               activityIds: activities.map((a) => a.id),
+              taskIds: tasks.map((t) => t.id),
             });
         }
         const current = await this.prisma.prospect.findFirst({
@@ -602,21 +625,37 @@ export class DebriefService {
         }
         if (Object.keys(update).length)
           await this.prospects.update(userId, prospectId, update);
+        await this.createTasks(userId, item.tasks, prospectId);
         results.push({ name, ok: true, prospectId, created });
       } catch (e) {
         results.push({ name, ok: false, error: message(e) });
       }
     }
 
-    // Contacts logged by this save are the ones that weren't there before.
+    const general = await this.createTasks(userId, dto.tasks, null);
+    if (general.length)
+      undo.push({ prospectId: '', created: false, taskIds: general });
+
+    // Contacts and to-dos added by this save are the ones that weren't there
+    // before (moving to "Forms sent" can add a checklist too).
     for (const u of undo) {
-      if (u.created || !u.activityIds) continue;
-      const had = new Set(u.activityIds);
-      const now = await this.prisma.activity.findMany({
-        where: { prospectId: u.prospectId },
-        select: { id: true },
-      });
-      u.activityIds = now.map((a) => a.id).filter((a) => !had.has(a));
+      if (u.created || !u.before) continue;
+      const [activities, tasks] = await Promise.all([
+        this.prisma.activity.findMany({
+          where: { prospectId: u.prospectId },
+          select: { id: true },
+        }),
+        this.prisma.task.findMany({
+          where: { prospectId: u.prospectId },
+          select: { id: true },
+        }),
+      ]);
+      const hadActivity = new Set(u.activityIds);
+      const hadTask = new Set(u.taskIds);
+      u.activityIds = activities
+        .map((a) => a.id)
+        .filter((a) => !hadActivity.has(a));
+      u.taskIds = tasks.map((t) => t.id).filter((t) => !hadTask.has(t));
     }
 
     const saved = await this.prisma.debrief.update({
@@ -656,6 +695,11 @@ export class DebriefService {
     const items = (d.undo as unknown as UndoItem[]).slice().reverse();
     await this.prisma.$transaction(async (tx) => {
       for (const u of items) {
+        if (u.taskIds?.length)
+          await tx.task.deleteMany({
+            where: { id: { in: u.taskIds }, ownerId: userId },
+          });
+        if (!u.prospectId) continue; // General to-dos only.
         if (u.created) {
           await tx.prospect.deleteMany({
             where: { id: u.prospectId, ownerId: userId },
@@ -685,6 +729,29 @@ export class DebriefService {
       }
     });
     return this.view(await this.owned(userId, id));
+  }
+
+  /** Adds the to-dos kept on the review screen. Returns their ids. */
+  private async createTasks(
+    userId: string,
+    tasks: ApplyTaskDto[] | undefined,
+    prospectId: string | null,
+  ) {
+    const ids: string[] = [];
+    for (const t of tasks ?? []) {
+      const row = await this.prisma.task.create({
+        data: {
+          ownerId: userId,
+          prospectId,
+          title: t.title.trim(),
+          dueDate: t.dueDate ? toDate(t.dueDate) : null,
+          dueTime: t.dueDate ? (t.dueTime ?? null) : null,
+        },
+        select: { id: true },
+      });
+      ids.push(row.id);
+    }
+    return ids;
   }
 
   async remove(userId: string, id: string) {
@@ -731,6 +798,22 @@ function amount(n: number) {
 }
 
 /** A real date within [today + from, today + to] days, else null. */
+function todosOf(
+  todos: { title: string; dueDate: string; dueTime: string }[],
+  today: string,
+): SuggestedTask[] {
+  return todos
+    .filter((t) => t.title.trim())
+    .map((t) => {
+      const dueDate = validDate(t.dueDate, today, -1, 400);
+      return {
+        title: t.title.trim().slice(0, 200),
+        dueDate,
+        dueTime: dueDate && HHMM.test(t.dueTime) ? t.dueTime : null,
+      };
+    });
+}
+
 function validDate(ymd: string, today: string, from: number, to: number) {
   if (!YMD.test(ymd) || isNaN(Date.parse(ymd))) return null;
   return ymd >= addDays(today, from) && ymd <= addDays(today, to) ? ymd : null;

@@ -80,6 +80,21 @@ class ContactDto {
   @Matches(YMD, { message: 'Pick a valid contact date' }) date: string;
 }
 
+export class ApplyTaskDto {
+  @IsString()
+  @IsNotEmpty({ message: 'Say what needs doing' })
+  @MaxLength(200)
+  title: string;
+
+  @IsOptional()
+  @Matches(YMD, { message: 'Pick a valid date' })
+  dueDate?: string;
+
+  @IsOptional()
+  @Matches(HHMM, { message: 'Pick a valid time' })
+  dueTime?: string;
+}
+
 /** One reviewed person: either an existing prospect or a new one. */
 export class ApplyItemDto {
   @IsOptional() @IsUUID('4') prospectId?: string;
@@ -125,6 +140,13 @@ export class ApplyItemDto {
   @IsOptional()
   @Matches(HHMM, { message: 'Pick a valid time' })
   nextTime?: string;
+
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(30)
+  @ValidateNested({ each: true })
+  @Type(() => ApplyTaskDto)
+  tasks?: ApplyTaskDto[];
 }
 
 export class ApplyDebriefDto {
@@ -133,4 +155,12 @@ export class ApplyDebriefDto {
   @ValidateNested({ each: true })
   @Type(() => ApplyItemDto)
   items: ApplyItemDto[];
+
+  /** General to-dos, not about anyone. */
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(30)
+  @ValidateNested({ each: true })
+  @Type(() => ApplyTaskDto)
+  tasks?: ApplyTaskDto[];
 }

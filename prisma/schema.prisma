@@ -154,6 +154,7 @@ model User {
   prospects     Prospect[]
   activities    Activity[]
   templates     Template[]
+  tasks         Task[]
   cadences      Cadence[]
   balances      Balance[]
   resetTokens   PasswordResetToken[]
@@ -285,6 +286,7 @@ model Prospect {
   cadence    Cadence?   @relation(fields: [cadenceId], references: [id], onDelete: SetNull)
   activities Activity[]
   balances   Balance[]
+  tasks      Task[]
 
   @@index([ownerId, nextDate])
   @@index([ownerId, stage])
@@ -381,4 +383,36 @@ model Debrief {
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@index([userId, createdAt])
+}
+
+enum Repeat {
+  DAILY
+  WEEKLY
+  MONTHLY
+}
+
+/// A to-do: general, or about one prospect (e.g. a document to collect).
+model Task {
+  id         String    @id @default(uuid())
+  ownerId    String
+  prospectId String?
+  title      String
+  dueDate    DateTime? @db.Date
+  // Local "HH:MM" on dueDate; set means a reminder is sent
+  dueTime    String?
+  // "YYYY-MM-DD HH:MM" a reminder was last sent for
+  remindedFor String?
+  repeat     Repeat?
+  // Set on items of an account-opening checklist: INDIVIDUAL or BUSINESS
+  checklist  String?
+  position   Int       @default(0)
+  doneAt     DateTime?
+  createdAt  DateTime  @default(now())
+  updatedAt  DateTime  @updatedAt
+
+  owner    User      @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  prospect Prospect? @relation(fields: [prospectId], references: [id], onDelete: Cascade)
+
+  @@index([ownerId, doneAt, dueDate])
+  @@index([prospectId])
 }

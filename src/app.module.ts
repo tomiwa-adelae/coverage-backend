@@ -17,6 +17,7 @@ import { ProspectsModule } from './prospects/prospects.module';
 import { SmsModule } from './sms/sms.module';
 import { TeamsModule } from './teams/teams.module';
 import { TemplatesModule } from './templates/templates.module';
+import { TasksModule } from './tasks/tasks.module';
 import { UsersController } from './users/users.controller';
 
 @Module({
@@ -31,6 +32,7 @@ import { UsersController } from './users/users.controller';
     ProspectsModule,
     DashboardModule,
     TemplatesModule,
+    TasksModule,
     CadencesModule,
     NotificationsModule,
     AiModule,

@@ -130,6 +130,22 @@ const OUTCOMES = [
   'NOT_INTERESTED',
 ] as const;
 
+const TodoSchema = z.object({
+  title: z
+    .string()
+    .describe(
+      'The job as a short instruction, e.g. "Collect utility bill" or "Ask ops about the dormant account".',
+    ),
+  dueDate: z
+    .string()
+    .describe(
+      'YYYY-MM-DD if a day was said, worked out from the calendar given. Empty otherwise.',
+    ),
+  dueTime: z
+    .string()
+    .describe('24-hour HH:MM if a time was said. Empty otherwise.'),
+});
+
 const DebriefItemSchema = z.object({
   mention: z
     .string()
@@ -230,6 +246,11 @@ const DebriefItemSchema = z.object({
     .describe(
       '24-hour HH:MM of the next step if a time was said ("2pm" = "14:00"; "morning" alone is not a time). Empty otherwise.',
     ),
+  todos: z
+    .array(TodoSchema)
+    .describe(
+      'Small jobs the speaker promised or needs to do for this person, besides the next contact: documents to collect, things to send, things to check. Do not repeat the next step here. Empty if none.',
+    ),
   check: z
     .array(z.string())
     .describe(
@@ -243,10 +264,15 @@ const DebriefSchema = z.object({
     .describe(
       'One entry per prospect or customer talked about, in the order first mentioned. Merge everything said about the same person into one entry.',
     ),
+  todos: z
+    .array(TodoSchema)
+    .describe(
+      'The speaker’s own jobs that aren’t about one prospect (e.g. "Submit the weekly report", "Chase ops on pending accounts"). Empty if none.',
+    ),
   other: z
     .array(z.string())
     .describe(
-      'Anything said that isn’t about a specific prospect (own to-dos, reminders, general notes), one short line each.',
+      'Anything else said that isn’t about a specific prospect and isn’t a job to do (general notes), one short line each.',
     ),
 });
 

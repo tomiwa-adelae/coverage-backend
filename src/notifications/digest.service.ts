@@ -3,7 +3,7 @@ import { Cron } from '@nestjs/schedule';
 import { PrismaService } from '../prisma/prisma.service';
 import { DashboardService } from '../dashboard/dashboard.service';
 import { MailService, escapeHtml } from '../mail/mail.service';
-import { todayIn } from '../common/dates';
+import { addDays, startOfDay, todayIn } from '../common/dates';
 import { PushService } from './push.service';
 import { clock } from '../common/dates';
 
@@ -233,11 +233,32 @@ ${extras}${button(appUrl(), 'Open Coverage')}
     const [user, p] = await Promise.all([
       this.prisma.user.findUniqueOrThrow({
         where: { id: userId },
-        select: { name: true, email: true, jobTitle: true, branch: true },
+        select: {
+          name: true,
+          email: true,
+          jobTitle: true,
+          branch: true,
+          timezone: true,
+        },
       }),
       this.dashboard.progress(userId),
     ]);
     const lastWeek = p.weeks[6];
+    const done = await this.prisma.task.findMany({
+      where: {
+        ownerId: userId,
+        doneAt: {
+          gte: startOfDay(lastWeek.weekStart, user.timezone),
+          lt: startOfDay(addDays(lastWeek.weekStart, 7), user.timezone),
+        },
+      },
+      orderBy: { doneAt: 'asc' },
+      select: {
+        title: true,
+        checklist: true,
+        prospect: { select: { name: true } },
+      },
+    });
     const t = p.targetStatus;
     const top = await this.prisma.prospect.findMany({
       where: {
@@ -251,8 +272,14 @@ ${extras}${button(appUrl(), 'Open Coverage')}
       take: 5,
       select: { name: true, company: true, stage: true, potential: true },
     });
+    const who = {
+      name: user.name,
+      email: user.email,
+      jobTitle: user.jobTitle,
+      branch: user.branch,
+    };
     return {
-      user,
+      user: who,
       weekStart: lastWeek.weekStart,
       contacts: lastWeek.touches,
       accountsOpened: lastWeek.accountsOpened,
@@ -264,6 +291,13 @@ ${extras}${button(appUrl(), 'Open Coverage')}
       weightedPipeline: t.forecast.weighted,
       stages: p.byStage,
       opportunities: top.map((o) => ({ ...o, potential: Number(o.potential) })),
+      tasksDone: done.length,
+      documentsCollected: done.filter((t) => t.checklist).length,
+      // The rest, by name; checklist ticks are summed up above instead.
+      completed: done
+        .filter((t) => !t.checklist)
+        .slice(0, 15)
+        .map((t) => ({ title: t.title, prospect: t.prospect?.name ?? null })),
     };
   }
 
@@ -276,6 +310,12 @@ ${extras}${button(appUrl(), 'Open Coverage')}
     const r = await this.weeklyReport(userId);
     const line = (label: string, value: string) =>
       `<tr><td style="padding:6px 0;color:#5b6b74">${label}</td><td style="padding:6px 0;text-align:right;font-weight:600">${value}</td></tr>`;
+    const done = r.completed
+      .map(
+        (t) =>
+          `<li>${escapeHtml(t.title)}${t.prospect ? ` (${escapeHtml(t.prospect)})` : ''}</li>`,
+      )
+      .join('');
     const opps = r.opportunities
       .map(
         (o) =>
@@ -294,6 +334,10 @@ ${extras}${button(appUrl(), 'Open Coverage')}
         `Deposit balance: ${naira(r.balance)} of ${naira(r.target)}`,
         `On pace for: ${naira(r.projected)} by ${r.endMonth}`,
         `Weighted pipeline: ${naira(r.weightedPipeline)}`,
+        `To-dos completed: ${r.tasksDone} (${r.documentsCollected} account-opening documents collected)`,
+        ...r.completed.map(
+          (t) => `- ${t.title}${t.prospect ? ` (${t.prospect})` : ''}`,
+        ),
       ].join('\n'),
       html: layout(
         'Weekly update',
@@ -305,7 +349,10 @@ ${line('Accounts opened', String(r.accountsOpened))}
 ${line('Deposit balance', `${naira(r.balance)} of ${naira(r.target)}`)}
 ${line('On pace for', `${naira(r.projected)} by ${r.endMonth}`)}
 ${line('Weighted pipeline', naira(r.weightedPipeline))}
+${line('To-dos completed', String(r.tasksDone))}
+${line('Account-opening documents collected', String(r.documentsCollected))}
 </table>
+${done ? `<p style="margin-top:18px;font-weight:600">Completed</p><ul>${done}</ul>` : ''}
 ${opps ? `<p style="margin-top:18px;font-weight:600">Biggest open opportunities</p><ul>${opps}</ul>` : ''}`,
       ),
     });
